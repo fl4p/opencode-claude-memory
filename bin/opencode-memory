@@ -543,6 +543,148 @@ if row and row[0]:
 PY
 }
 
+# Recover the commit-hash provenance the forked extractor otherwise lacks: the
+# fork replays the real tool calls (so file:line is already visible), but a
+# commit made at/after the conversation may not show its hash in any tool output.
+# So we git-log every repo the session touched (the working dir PLUS any nested
+# checkout a touched file lives in) over the session's time window, and print a
+# hash + time + changed-files block to prepend to the extract prompt. The
+# PROVENANCE RULE then tells the model to cite a matching hash (never invent one).
+# Read-only; prints nothing (=> no block injected) on any error or empty result.
+get_session_commits_block() {
+  local session_id="$1"
+  local working_dir="$2"
+  local db_path
+  db_path=$(get_opencode_db_path)
+
+  if [ -z "$session_id" ] || [ -z "$working_dir" ] || [ ! -f "$db_path" ] || ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+
+  python3 - "$db_path" "$session_id" "$working_dir" <<'PY'
+import sqlite3, sys, os, json, subprocess
+from datetime import datetime
+
+db_path, session_id, directory = sys.argv[1:4]
+MAX_PROVENANCE_REPOS, MAX_REPO_PROBE_DIRS, MAX_COMMITS = 4, 40, 40
+PAD_MIN, PAD_AFTER_MIN = 5, 90
+
+def done():  # print nothing, exit clean -> caller injects no block
+    raise SystemExit(0)
+
+# session time window + touched files, from the part table
+try:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    rows = conn.execute(
+        "SELECT time_created, json_extract(data,'$.type'), json_extract(data,'$.state.input') "
+        "FROM part WHERE session_id = ?", (session_id,)).fetchall()
+except Exception:
+    done()
+finally:
+    try: conn.close()
+    except Exception: pass
+
+t_min = t_max = None
+touched, tseen = [], set()
+for tms, ptype, inp in rows:
+    if tms:
+        t_min = tms if t_min is None else min(t_min, tms)
+        t_max = tms if t_max is None else max(t_max, tms)
+    if ptype == "tool" and inp:
+        try: d = json.loads(inp)
+        except Exception: continue
+        for k in ("filePath", "file_path", "path", "file"):
+            v = d.get(k)
+            if isinstance(v, str) and v and v not in tseen:
+                tseen.add(v); touched.append(v); break
+if t_min is None or t_max is None:
+    done()
+
+# nearest-.git work-tree root above a path (nesting-correct, stat-only, memoized)
+_cache = {}
+def toplevel(start):
+    if not start: return ""
+    d = start if os.path.isdir(start) else os.path.dirname(start)
+    chain = []
+    while d and d not in _cache:
+        chain.append(d)
+        if os.path.exists(os.path.join(d, ".git")):
+            root = os.path.realpath(d)
+            for c in chain: _cache[c] = root
+            return root
+        parent = os.path.dirname(d)
+        if parent == d: break
+        d = parent
+    root = _cache.get(d, "")
+    for c in chain: _cache[c] = root
+    return root
+
+# distinct repos the session touched, working dir first (its commits are primary)
+roots, seen = [], set()
+def add(start):
+    top = toplevel(start)
+    if top and top not in seen:
+        seen.add(top); roots.append(top)
+add(directory)
+probed = set()
+for f in touched:
+    dd = f if os.path.isdir(f) else os.path.dirname(f)
+    if not dd or dd in probed: continue
+    probed.add(dd)
+    if len(probed) > MAX_REPO_PROBE_DIRS: break
+    add(dd)
+repos = roots[:MAX_PROVENANCE_REPOS]
+if not repos:
+    done()
+
+since = datetime.fromtimestamp(t_min/1000 - PAD_MIN*60).strftime("%Y-%m-%d %H:%M:%S")
+until = datetime.fromtimestamp(t_max/1000 + PAD_AFTER_MIN*60).strftime("%Y-%m-%d %H:%M:%S")
+
+def log_entries(repo, limit):
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo, "log", f"--since={since}", f"--until={until}",
+             f"--max-count={limit}", "--no-merges",
+             "--pretty=format:%h\t%ad\t%s", "--date=format:%Y-%m-%d %H:%M:%S", "--name-only"],
+            capture_output=True, text=True, timeout=30)
+    except Exception:
+        return []
+    if out.returncode != 0 or not out.stdout.strip():
+        return []
+    entries, header, cur = [], None, []
+    def flush():
+        if header:
+            h, dt, s = header
+            files = ", ".join(cur[:12]) + (" …" if len(cur) > 12 else "")
+            entries.append((h, f"- {h}  {dt}  {s}" + (f"\n    files: {files}" if files else "")))
+    for ln in out.stdout.splitlines():
+        if ln.count("\t") >= 2:
+            flush(); p = ln.split("\t", 2); header, cur = (p[0], p[1], p[2]), []
+        elif ln.strip():
+            cur.append(ln.strip())
+    flush()
+    return entries
+
+seen_h, sections, n = set(), [], 0
+label = len(repos) > 1
+for repo in repos:
+    if n >= MAX_COMMITS: break
+    fresh = [(h, e) for (h, e) in log_entries(repo, MAX_COMMITS - n) if h not in seen_h]
+    if not fresh: continue
+    seen_h.update(h for h, _ in fresh); n += len(fresh)
+    body = "\n".join(e for _, e in fresh)
+    sections.append((f"### repo: {repo}\n" if label else "") + body)
+if not sections:
+    done()
+
+print("## Commits in this session (use to anchor project memories)")
+print("Match a memory's code change to the commit whose time and changed files fit, "
+      "and cite its hash. Do not cite a commit that does not match.")
+print()
+print("\n\n".join(sections))
+PY
+}
+
 get_session_target_id() {
   local before_json="$1"
   local started_at_ms="$2"
@@ -1307,7 +1449,20 @@ run_extraction_if_needed() {
   if [ -n "$EXTRACT_AGENT" ]; then
     cmd+=(--agent "$EXTRACT_AGENT")
   fi
-  cmd+=("$EXTRACT_PROMPT")
+
+  # Prepend recovered commit-hash provenance to the extract prompt (opt-out via
+  # OPENCODE_MEMORY_PROVENANCE=0). file:line provenance needs nothing extra — the
+  # fork already replays the real tool calls.
+  local commits_block=""
+  if [ "${OPENCODE_MEMORY_PROVENANCE:-1}" != "0" ]; then
+    commits_block=$(get_session_commits_block "$session_id" "$WORKING_DIR" 2>/dev/null || true)
+  fi
+  if [ -n "$commits_block" ]; then
+    cmd+=("${commits_block}"$'\n\n'"$EXTRACT_PROMPT")
+    log "Injected commit provenance ($(printf '%s\n' "$commits_block" | grep -c '^- ') commits)"
+  else
+    cmd+=("$EXTRACT_PROMPT")
+  fi
 
   local fork_started_at_ms
   fork_started_at_ms=$(( $(date +%s) * 1000 ))
