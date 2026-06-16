@@ -95,7 +95,9 @@ describe("buildMemorySystemPrompt", () => {
     const prompt = buildMemorySystemPrompt(repo)
     expect(prompt).toContain("```markdown")
     expect(prompt).toContain("name: {{memory name}}")
-    expect(prompt).toContain("type: {{user, feedback, project, reference}}")
+    // Type lives under the nested `metadata:` block, matching Claude Code's
+    // current on-disk schema (not the legacy flat top-level `type:`).
+    expect(prompt).toContain("metadata:\n  type: {{user, feedback, project, reference}}")
   })
 
   test("includes persistence section", () => {

@@ -11,7 +11,7 @@
 | Memory CRUD (save/delete/list/search/read) | 5 个工具 | 5 个工具，参数和格式一致 | ✅ 完全覆盖 |
 | Memory 类型体系 (user/feedback/project/reference) | `memoryTypes.ts` | `prompt.ts` 完整复刻 | ✅ 完全覆盖 |
 | MEMORY.md 索引管理 | 双层 index + topic file | 同样的双层结构 | ✅ 完全覆盖 |
-| Frontmatter 格式 | name/description/type | 相同格式 | ✅ 完全覆盖 |
+| Frontmatter 格式 | name/description + 嵌套 `metadata.{node_type,type,originSessionId}` | 已对齐：写入嵌套 `metadata` 块，解析器兼容旧的扁平 `type:` | ✅ 已对齐 (原为扁平 `type:`，与新版 schema 不兼容) |
 | 路径解析 + Git worktree | sanitizePath + djb2Hash + worktree backlink | byte-identical 复刻 | ✅ 完全覆盖 |
 | 安全校验 | validateMemoryFileName, path traversal | 同样的校验逻辑 | ✅ 完全覆盖 |
 | Memory 扫描 + Manifest | `memoryScan.ts` recursive scan + header | 完整复刻 | ✅ 完全覆盖 |

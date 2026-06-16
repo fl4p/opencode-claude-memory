@@ -62,8 +62,20 @@ function parseFrontmatter(raw: string): { frontmatter: Record<string, string>; c
   return { frontmatter, content }
 }
 
-function buildFrontmatter(name: string, description: string, type: MemoryType): string {
-  return `---\nname: ${name}\ndescription: ${description}\ntype: ${type}\n---`
+// Emit the nested `metadata` block that Claude Code's memory subsystem writes
+// on disk (a memory is a node in its memory graph). The flat top-level `type:`
+// of older Claude Code releases is gone; aligning here keeps files written by
+// this plugin byte-compatible with Claude Code's store. `parseFrontmatter`
+// reads both the nested and the legacy flat form, so reads stay compatible.
+function buildFrontmatter(
+  name: string,
+  description: string,
+  type: MemoryType,
+  originSessionId?: string,
+): string {
+  const metadata = ["  node_type: memory", `  type: ${type}`]
+  if (originSessionId) metadata.push(`  originSessionId: ${originSessionId}`)
+  return `---\nname: ${name}\ndescription: ${description}\nmetadata:\n${metadata.join("\n")}\n---`
 }
 
 function parseMemoryType(raw: string | undefined): MemoryType | undefined {
@@ -136,12 +148,13 @@ export function saveMemory(
   description: string,
   type: MemoryType,
   content: string,
+  originSessionId?: string,
 ): string {
   const safeName = validateMemoryFileName(fileName)
   const memDir = getMemoryDir(worktree)
   const filePath = join(memDir, safeName)
 
-  const fileContent = `${buildFrontmatter(name, description, type)}\n\n${content.trim()}\n`
+  const fileContent = `${buildFrontmatter(name, description, type, originSessionId)}\n\n${content.trim()}\n`
   if (Buffer.byteLength(fileContent, "utf-8") > MAX_MEMORY_FILE_BYTES) {
     throw new Error(
       `Memory file content exceeds the ${MAX_MEMORY_FILE_BYTES}-byte limit`,

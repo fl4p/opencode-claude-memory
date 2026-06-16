@@ -437,8 +437,23 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
               "Memory content. For feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines",
             ),
         },
-        async execute(args, _ctx) {
-          const filePath = saveMemory(memoryRoot, args.file_name, args.name, args.description, args.type, args.content)
+        async execute(args, ctx) {
+          // ToolContext carries the originating sessionID; record it as
+          // memory provenance, matching Claude Code's on-disk metadata. The
+          // guard keeps the unit-test mock (which passes only { callID }) working.
+          const originSessionId =
+            typeof (ctx as { sessionID?: unknown })?.sessionID === "string"
+              ? (ctx as { sessionID?: string }).sessionID
+              : undefined
+          const filePath = saveMemory(
+            memoryRoot,
+            args.file_name,
+            args.name,
+            args.description,
+            args.type,
+            args.content,
+            originSessionId,
+          )
           return `Memory saved to ${filePath}`
         },
       }),
