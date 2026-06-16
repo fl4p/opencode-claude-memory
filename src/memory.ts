@@ -15,12 +15,19 @@ import {
 export const MEMORY_TYPES = ["user", "feedback", "project", "reference"] as const
 export type MemoryType = (typeof MEMORY_TYPES)[number]
 
+// Provenance stamp written into every memory this plugin saves, so plugin-authored
+// memories are distinguishable from ones Claude Code's own memory subsystem wrote
+// in the shared store. Claude Code (and our parser) ignore unknown metadata fields,
+// so this stays byte-compatible.
+export const MEMORY_GENERATOR = "opencode-claude-memory"
+
 export type MemoryEntry = {
   filePath: string
   fileName: string
   name: string
   description: string
   type: MemoryType
+  created: string
   content: string
   rawContent: string
 }
@@ -72,10 +79,17 @@ function buildFrontmatter(
   description: string,
   type: MemoryType,
   originSessionId?: string,
+  created?: string,
 ): string {
-  const metadata = ["  node_type: memory", `  type: ${type}`]
+  // `created` is a top-level sort key (Claude Code's auto-dream copies it from
+  // the oldest source memory when collapsing a duplicate cluster, so manifest
+  // order survives consolidation). Auto-stamp to now unless a caller passes one
+  // through — the only caller that does is a consolidation pass preserving the
+  // oldest source's date.
+  const createdAt = created?.trim() || new Date().toISOString()
+  const metadata = ["  node_type: memory", `  generator: ${MEMORY_GENERATOR}`, `  type: ${type}`]
   if (originSessionId) metadata.push(`  originSessionId: ${originSessionId}`)
-  return `---\nname: ${name}\ndescription: ${description}\nmetadata:\n${metadata.join("\n")}\n---`
+  return `---\nname: ${name}\ndescription: ${description}\ncreated: ${createdAt}\nmetadata:\n${metadata.join("\n")}\n---`
 }
 
 function parseMemoryType(raw: string | undefined): MemoryType | undefined {
@@ -108,6 +122,7 @@ export function listMemories(worktree: string): MemoryEntry[] {
         name: frontmatter.name ?? fileName.replace(/\.md$/, ""),
         description: frontmatter.description ?? "",
         type: parseMemoryType(frontmatter.type) ?? "user",
+        created: frontmatter.created ?? "",
         content,
         rawContent,
       })
@@ -133,6 +148,7 @@ export function readMemory(worktree: string, fileName: string): MemoryEntry | nu
       name: frontmatter.name ?? fileName.replace(/\.md$/, ""),
       description: frontmatter.description ?? "",
       type: parseMemoryType(frontmatter.type) ?? "user",
+      created: frontmatter.created ?? "",
       content,
       rawContent,
     }
@@ -149,12 +165,13 @@ export function saveMemory(
   type: MemoryType,
   content: string,
   originSessionId?: string,
+  created?: string,
 ): string {
   const safeName = validateMemoryFileName(fileName)
   const memDir = getMemoryDir(worktree)
   const filePath = join(memDir, safeName)
 
-  const fileContent = `${buildFrontmatter(name, description, type, originSessionId)}\n\n${content.trim()}\n`
+  const fileContent = `${buildFrontmatter(name, description, type, originSessionId, created)}\n\n${content.trim()}\n`
   if (Buffer.byteLength(fileContent, "utf-8") > MAX_MEMORY_FILE_BYTES) {
     throw new Error(
       `Memory file content exceeds the ${MAX_MEMORY_FILE_BYTES}-byte limit`,

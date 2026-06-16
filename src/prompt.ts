@@ -2,17 +2,43 @@ import { MEMORY_TYPES } from "./memory.js"
 import { readIndex, truncateEntrypoint } from "./memory.js"
 import { getMemoryDir, ENTRYPOINT_NAME, MAX_ENTRYPOINT_LINES, getProjectDir } from "./paths.js"
 
-// Port of Claude Code's MEMORY_FRONTMATTER_EXAMPLE from memoryTypes.ts
+// ─────────────────────────────────────────────────────────────────────────────
+// Re-baselined against Claude Code 2.1.178 (the authoritative source, extracted
+// from the installed binary at ~/.local/share/claude/versions/2.1.178). Adopted
+// from it: the negative-judgement caveat (user type), the `[[their-name]]`
+// memory-linking instruction + `{{short-kebab-case-slug}}` frontmatter form, and
+// the never-save-credentials rule.
+//
+// DELIBERATE deltas from 2.1.178 (documented so future syncs don't "fix" them):
+//   1. FLAT model — we do NOT adopt CC 2.1.178's private/team scope system
+//      (per-type <scope> tags, a session-synced `team/` directory, scope tags in
+//      examples). A single-user opencode setup has no shared team dir, and
+//      staying flat keeps us compatible with CC's private/default directory,
+//      which is the bidirectional-sharing target.
+//   2. ADDED (not a CC concept): the `harness_feedback` sidecar (Obj1 routing).
+//      The two-phase extraction + evidence rule live in bin/opencode-memory's
+//      EXTRACT_PROMPT, not here.
+//   3. KEPT (kuitos addition, absent from CC): the "Searching past context"
+//      grep-helper section.
+//   4. "AGENTS.md" instead of CC's "CLAUDE.md" in What-NOT-to-save (opencode
+//      convention).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Re-baselined against Claude Code 2.1.178's MEMORY_FRONTMATTER_EXAMPLE
+// (extracted from the installed binary). Adopted from the authoritative text:
+// the `{{short-kebab-case-slug}}` name form and the `[[their-name]]` memory-
+// linking instruction, which our older port was missing. We keep the nested
+// `metadata.type` only (no team/private scope — see DELTAS below).
 const FRONTMATTER_EXAMPLE = [
   "```markdown",
   "---",
-  "name: {{memory name}}",
-  "description: {{one-line description — used to decide relevance in future conversations, so be specific}}",
+  "name: {{short-kebab-case-slug}}",
+  "description: {{one-line summary — used to decide relevance in future conversations, so be specific}}",
   "metadata:",
   `  type: {{${MEMORY_TYPES.join(", ")}}}`,
   "---",
   "",
-  "{{memory content — for feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines}}",
+  "{{memory content — for feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines. Link related memories with [[their-name]].}}",
   "```",
 ]
 
@@ -25,7 +51,7 @@ const TYPES_SECTION = [
   "<types>",
   "<type>",
   "    <name>user</name>",
-  "    <description>Contain information about the user's role, goals, responsibilities, and knowledge. Great user memories help you tailor your future behavior to the user's preferences and perspective. Your goal in reading and writing these memories is to build up an understanding of who the user is and how you can be most helpful to them specifically. For example, you should collaborate with a senior software engineer differently than a student who is coding for the very first time. Keep in mind, that the aim here is to be helpful to the user.</description>",
+  "    <description>Contain information about the user's role, goals, responsibilities, and knowledge. Great user memories help you tailor your future behavior to the user's preferences and perspective. Your goal in reading and writing these memories is to build up an understanding of who the user is and how you can be most helpful to them specifically. For example, you should collaborate with a senior software engineer differently than a student who is coding for the very first time. Keep in mind, that the aim here is to be helpful to the user. Avoid writing memories about the user that could be viewed as a negative judgement or that are not relevant to the work you're trying to accomplish together.</description>",
   "    <when_to_save>When you learn any details about the user's role, preferences, responsibilities, or knowledge</when_to_save>",
   "    <how_to_use>When your work should be informed by the user's profile or perspective. For example, if the user is asking you to explain a part of the code, you should answer that question in a way that is tailored to the specific details that they will find most valuable or that helps them build their mental model in relation to domain knowledge they already have.</how_to_use>",
   "    <examples>",
@@ -93,8 +119,33 @@ const WHAT_NOT_TO_SAVE = [
   "- Debugging solutions or fix recipes — the fix is in the code; the commit message has the context.",
   "- Anything already documented in AGENTS.md or project config files.",
   "- Ephemeral task details: in-progress work, temporary state, current conversation context.",
+  "- Secrets — API keys, tokens, passwords, or credentials. Never write these into memory, and do not record where they are stored either (no \"the keys are in <file>\" pointers).",
+  "- Observations about how YOU or your skills/tools behaved, or how the harness should change — these are harness feedback, not memory. Route them to `harness_feedback` (see below), never `memory_save`.",
   "",
   "These exclusions apply even when the user explicitly asks you to save. If they ask you to save a PR list or activity summary, ask what was *surprising* or *non-obvious* about it — that is the part worth keeping.",
+].join("\n")
+
+// Obj1/Obj2 routing — see auto-memory/agent-memory-gotchas-1.md. Memory is for
+// durable facts the agent recalls; harness_feedback is the sidecar for
+// behavior/efficiency findings the harness developer acts on.
+const HARNESS_FEEDBACK_SECTION = [
+  "## Harness feedback (a sidecar — NOT memory)",
+  "",
+  "Some findings are not facts about the user, the project, or the world — they are observations about how *you* (the agent) or your *skills and tools* behaved, or about how the harness itself should change. These are feedback for the harness developer, not memory for future sessions. Do NOT save them with `memory_save`. Call `harness_feedback` instead.",
+  "",
+  "Route to `harness_feedback` when the finding is about:",
+  "- **tool-use efficiency**: redundant file reads, retry loops, errors not surfacing to you, thrashing.",
+  "- **agent/skill behavior**: a skill that only *described* what to do instead of acting, a missing background loop, polling too slow, a tool whose description should be clearer.",
+  "- **harness/prompt calibration**: something to fix in the system prompt or agent config rather than remember per-session.",
+  "",
+  "The test: if the fix is a *diff to the harness, prompt, or a skill* (read by a developer), it is `harness_feedback`. If the fix is *you knowing a durable fact next session*, it is memory. When torn between a `feedback` memory and harness feedback, ask: does this tell future-me a fact about THIS user or project (memory), or does it tell the developer to change how the agent works (harness feedback)?",
+  "",
+  "<examples>",
+  "- \"the channel skill only described polling instead of running an explicit background watcher; skills for continuous behavior need a concrete loop\" → harness_feedback (skill-design)",
+  "- \"the agent re-read auth.ts four times with no edits in between\" → harness_feedback (tool-efficiency)",
+  "- \"this user prefers terse replies with no trailing summary\" → memory (feedback) — a durable fact about the user, not a harness defect",
+  "</examples>",
+  "",
 ].join("\n")
 
 // Port of Claude Code's WHEN_TO_ACCESS_SECTION from memoryTypes.ts
@@ -188,6 +239,7 @@ export function buildMemorySystemPrompt(
     TYPES_SECTION,
     WHAT_NOT_TO_SAVE,
     "",
+    HARNESS_FEEDBACK_SECTION,
     howToSave,
     "",
     WHEN_TO_ACCESS,

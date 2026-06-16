@@ -258,6 +258,12 @@ FOREGROUND="${OPENCODE_MEMORY_FOREGROUND:-0}"
 LOG_ENABLED="${OPENCODE_MEMORY_TERMINAL_LOG:-}"
 EXTRACT_MODEL="${OPENCODE_MEMORY_MODEL:-}"
 EXTRACT_AGENT="${OPENCODE_MEMORY_AGENT:-}"
+# user-profile memories are OPT-IN (default off): a hand-built gold-standard store
+# for a focused project carried zero of them. Credential *pointers* (references to
+# where secrets live, never the values) are OPT-OUT (default allowed): that is how
+# the user actually tracks where creds are.
+CAPTURE_USER="${OPENCODE_MEMORY_CAPTURE_USER:-0}"
+REDACT_CRED_POINTERS="${OPENCODE_MEMORY_REDACT_CRED_POINTERS:-0}"
 
 AUTODREAM_ENABLED="${OPENCODE_MEMORY_AUTODREAM:-1}"
 AUTODREAM_MIN_HOURS="${OPENCODE_MEMORY_AUTODREAM_MIN_HOURS:-24}"
@@ -308,79 +314,108 @@ AUTODREAM_LOG_FILE="$LOG_DIR/dream-${TASK_LOG_PREFIX}.log"
 
 # Adapted from Claude Code's extraction prompt, simplified for OpenCode's
 # headless run mode. The model sees the full conversation context via --fork.
-EXTRACT_PROMPT='You are now acting as the memory extraction subagent. Review the entire conversation above and extract any information worth remembering for future sessions.
+EXTRACT_PROMPT='You are the post-session extraction subagent. Work in TWO ORDERED PHASES over the conversation above. The phases capture different things into different sinks. Do Phase 1 first, then Phase 2.
 
-## What to save
+# Phase 1 — Harness feedback (do this FIRST, before any memory)
 
-Use the `memory_save` tool to persist memories. There are four types:
+Scan the conversation for observations about how the AGENT, its SKILLS, or its TOOLS behaved, or about how the harness itself should change. These are feedback for the harness developer: the fix is a diff to a system prompt, an agent config, or a skill — NOT a fact the agent recalls next session. Record each with the `harness_feedback` tool (category: tool-efficiency | agent-behavior | skill-design | harness-config | other).
 
-1. **user** — Who the user is: role, expertise, preferences, communication style. Helps tailor future interactions.
-2. **feedback** — Guidance on how to work: corrections ("don'\''t do X"), confirmations ("yes, keep doing that"), approach preferences. Include *why* so edge cases can be judged.
-3. **project** — Ongoing work context: goals, deadlines, initiatives, decisions, bugs. NOT derivable from code/git. Convert relative dates to absolute.
-4. **reference** — Pointers to external resources: URLs, tool names, where to find information outside the codebase.
+Record harness feedback when you see:
+- tool-use inefficiency: redundant file reads, retry loops, errors not surfacing to the agent, thrashing
+- a skill or tool that under-performed: one that only DESCRIBED what to do instead of acting, a missing background/watcher loop, polling too slowly, an unclear tool description, a behavior the user had to correct more than once
+- anything whose fix belongs in a prompt, config, or skill rather than in per-session memory
 
-## What NOT to save
+Strong signal: places where the user corrected the agent repeatedly, or was frustrated that the agent or a skill was not doing what it should. Those corrections are harness feedback, NOT user preferences and NOT memory.
 
+If Phase 1 finds nothing, record nothing and move on. That is common and fine.
+
+# Phase 2 — Memory (durable facts only)
+
+Now extract durable facts worth recalling in FUTURE sessions, with `memory_save`. Four types:
+
+1. **user** — Who the user is: role, expertise, domain, stable working preferences. DISABLED BY DEFAULT: do NOT save `user` memories unless a USER-CAPTURE line near the end of this prompt explicitly enables them. Absent that line, skip type=user entirely — even when the role is obvious. (A gold-standard hand-built store for a focused project carried zero user memories; they are low-value noise here unless the user opts in.)
+2. **feedback** — A standing preference for how to COLLABORATE with this user on this project (e.g. terse replies, bundle PRs, run tests before pushing). Include *why*.
+3. **project** — Ongoing work context: goals, deadlines, decisions, bugs. NOT derivable from code/git. Convert relative dates to absolute.
+4. **reference** — Pointers to external resources: URLs, tool names, config locations, where to find things outside the codebase.
+
+Hard-to-rederive beats strictly-absent-from-disk. DO save a `reference` or `project` memory for a fact that is technically in the code or config but would be PAINFUL to rediscover: a non-obvious feature-flag env var (such as an OPENCODE_EXPERIMENTAL_* gate), a global-config wiring that an agent working in a different repo would never think to read, or a cross-cutting setup step. Restraint means skipping junk and redundancy, not skipping a clean non-obvious fact. The memory bar is: durable AND useful AND not already in a doc/SKILL/config the user will open anyway.
+
+In Phase 2 do NOT analyze agent, skill, tool, or harness behavior — that was Phase 1. If a finding is about how the agent or a skill should be BUILT or should BEHAVE, it is harness_feedback, not a `feedback` memory.
+
+EVIDENCE RULE (user and feedback types): save it only if you can quote the specific user turn that proves it, and put a short quote in the content. If the user never stated or demonstrated it — if you are inferring it from one task or from watching the agent work — do NOT save it. A benchmark of three providers is not a provider preference. Terse phrasing in one session is not a stated communication style unless the user asked for terseness.
+
+REDACTION RULE: never write secret VALUES — no API keys, key prefixes, tokens, passwords, or any material that grants access. That part is absolute. You MAY, however, record a credential REFERENCE: a pointer to WHERE credentials live (e.g. a `reference` memory noting an endpoint requires basic auth and its creds are in `~/.cron-dash-creds`, or that a deploy key lives at `~/.cronicle-deploy-key`). A reference names the location only, never the secret — do not quote a password, do not write the password value, do not copy the contents of a creds file. If a CRED-POINTER line near the end of this prompt says pointers are DISABLED, also omit credential file locations and usernames; otherwise a location reference is allowed (it is how the user actually tracks where secrets live). When unsure about a VALUE, omit it.
+
+PROVENANCE RULE (project memories about code changes): anchor the memory in durable provenance, do not leave it vague. If a COMMITS block is provided in this message, cite the commit hash whose timestamp and changed files match the change you are describing; include the key `file:line` references that appear in the tool calls (e.g. `mppt.cpp:217`). A memory that says "fixed the timer wrap" is weak; "fixed in a1b2c3d — wallClockUs() now 64-bit, mppt.cpp:217" is durable and rederivable. Never invent a hash or a line number — cite only what the COMMITS block or the tool calls actually contain.
+
+## What NOT to save as memory
 - Code patterns, architecture, file structure — derivable from the codebase
 - Git history, recent changes — use `git log`/`git blame`
 - Debugging solutions — the fix is in the code
-- Anything already in AGENTS.md / project config files
+- Anything already in AGENTS.md, project config, a design doc, or a SKILL.md the user will reference — point to it at most, do not restate it
 - Ephemeral task details or current conversation context
-- Information that was already saved in a previous extraction
+- Information already saved in a previous extraction
+- The design, architecture, or file-format of ANY memory, notes, or knowledge system — INCLUDING a memory or notes system being designed in this very session. That lives in its own design doc, never in memory. Do not save "how memory files are formatted", "the auto-memory pipeline design", or a memory about this extraction process itself.
 
-## How to save
+## How to save a memory
+Call `memory_save` with: `file_name` (slug, e.g. `user_role`), `name` (short title), `description` (one-line, for relevance matching), `type` (user|feedback|project|reference), `content`. For feedback/project, structure the content as the rule/fact then **Why:** and **How to apply:** lines; for user/feedback, include the quoted evidence. Check `memory_list` first and update an existing entry instead of duplicating.
 
-For each memory worth saving, call `memory_save` with:
-- `file_name`: descriptive slug (e.g., `user_role`, `feedback_testing_approach`)
-- `name`: short title
-- `description`: one-line description (used for relevance matching in future sessions)
-- `type`: one of user, feedback, project, reference
-- `content`: the memory content. For feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines.
+# Calibration
+Be selective but not empty-handed. Many sessions warrant zero memories and that is fine — but a session that surfaced a clean, non-obvious, durable fact should save it. Skip junk, redundancy, projections, and ungrounded inferences; keep genuine signal. Do not invent a memory just because you were asked to extract, and do not suppress a good one just to be safe.'
 
-## Instructions
-
-1. Analyze the conversation for memorable information
-2. Check existing memories first (use `memory_list`) to avoid duplicates — update existing ones if needed
-3. Save each distinct memory as a separate entry
-4. If the conversation was trivial (e.g., just "hello" or a quick lookup), save nothing — that'\''s fine
-5. Be selective: 0-3 memories per session is typical. Quality over quantity.
-6. Do NOT save a memory about the extraction process itself.'
+# Append the runtime capture directives the prompt body refers to. user-profile
+# capture is opt-in (default off); credential-location references are opt-out
+# (default allowed — secret VALUES are never written regardless). The replay
+# harness parses the static EXTRACT_PROMPT above and so sees neither line, which
+# the prompt body resolves to exactly these defaults (user off, cred-pointer on).
+if [ "$CAPTURE_USER" = "1" ]; then
+  EXTRACT_PROMPT+=$'\n\nUSER-CAPTURE: ENABLED — you may save `user` memories when the EVIDENCE RULE is met.'
+else
+  EXTRACT_PROMPT+=$'\n\nUSER-CAPTURE: DISABLED — do not save any type=user memories in this run.'
+fi
+if [ "$REDACT_CRED_POINTERS" = "1" ]; then
+  EXTRACT_PROMPT+=$'\nCRED-POINTER: DISABLED — omit credential file locations and usernames too (secret values are always omitted regardless).'
+else
+  EXTRACT_PROMPT+=$'\nCRED-POINTER: ENABLED — a credential location reference is allowed; secret values are never written.'
+fi
 
 # Periodic memory consolidation inspired by Claude Code auto-dream.
 AUTODREAM_PROMPT="$(cat <<'EOF'
-You are performing an auto-dream memory consolidation pass.
+You are performing a dream — a small pruning pass over this project's memory files. The job is narrow: delete stale or invalidated memories, and collapse duplicates. Do NOT mass-rewrite, re-summarise, or "improve" memories that are already fine — a clean memory set is a valid outcome.
 
-Goal: tighten and de-duplicate memory files so future sessions can orient faster.
+## Tools — use ONLY these
+The memory store does NOT live in your working directory. The builtin file tools (read, write, edit, bash, grep, glob) CANNOT reach it and will error — operate exclusively through the memory_* tools below, addressing every memory by the file_name shown in memory_list (never by a filesystem path).
+- memory_list   — inventory every memory (name, type, created date, description)
+- memory_search — find memories by keyword
+- memory_read   — read one memory's full body and its `created` timestamp (pass its file_name, NOT a path)
+- memory_save   — write a fresh memory file (pass `created` to preserve an older date)
+- memory_delete — remove a memory file by its file_name
 
-## Available tools
-- memory_list
-- memory_search
-- memory_read
-- memory_save
-- memory_delete
+Work the whole inventory to completion in this one pass: read, decide, and apply your deletes/saves directly. Do not stop after planning, and do not ask for confirmation — there is no user to answer.
 
-## Phase 1 — Orient
-1. Use memory_list to inspect current memory inventory.
-2. Identify overlapping or stale entries that can be merged/updated/deleted.
+## Memory files are immutable
+Never edit a memory in place. To combine memories you DELETE the old files and, only if a single replacement is warranted, memory_save ONE fresh file. Each memory file holds exactly one fact — never fold unrelated facts into a multi-fact file to save space.
 
-## Phase 2 — Consolidate
-1. Merge duplicates into a single stronger memory using memory_save.
-2. Rewrite vague descriptions so retrieval is easier and more precise.
-3. For feedback/project entries, ensure content is structured as:
-   - main rule/fact
-   - **Why:**
-   - **How to apply:**
+## The pass
+1. memory_list to see the whole inventory. For any cluster that looks overlapping, memory_read each member before touching it — descriptions alone are not enough to merge on.
+2. For each memory, decide:
+   - **Stale / invalidated** — the fact no longer holds (contradicted by a newer memory, the project moved on, a preference changed). memory_delete it.
+   - **Duplicate / near-duplicate** — another memory already covers the same fact. Delete the redundant copies. If one richer single-fact memory would genuinely replace the cluster, memory_delete the whole cluster and memory_save one fresh file in its place. When you write that replacement, pass `created` = the OLDEST source memory's `created` value so the manifest sort order stays accurate.
+   - **Still good** — leave it untouched.
 
-## Phase 3 — Prune
-1. Delete memories that are clearly obsolete, contradictory, or low-value.
-2. Keep total memory set concise and high signal.
+## Discipline (carry over from how memories are saved)
+- Only collapse memories of the SAME type. A `user` profile, a `feedback` rule, a `project` fact and a `reference` pointer are different kinds — never fold one into another.
+- A combined memory may state only what its sources already established — do NOT invent, infer, or escalate a claim while merging.
+- Never introduce a credential value, file, path, or username pointer that the sources did not already contain; if a source leaks one, drop that detail rather than copying it forward.
+- Do not create a memory ABOUT the memory / notes system itself.
+- Keep each surviving description specific enough to retrieve on.
 
 ## Guardrails
-- Do NOT invent facts.
-- If confidence is low, keep existing memory instead of guessing.
-- If memory quality is already strong, make no changes and explicitly say so.
+- When confidence is low, KEEP the existing memory rather than guessing.
+- Never delete the last copy of a fact you cannot find recorded elsewhere.
+- If the memory set is already clean, change nothing and say so explicitly.
 
-Return a short summary of what you updated, merged, or removed.
+Return a brief summary: what you deleted, what you combined (and into what), and what you left alone. If nothing changed, say so.
 EOF
 )"
 

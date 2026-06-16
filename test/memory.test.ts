@@ -145,6 +145,25 @@ describe("saveMemory and readMemory", () => {
     const entry = readMemory(repo, "does_not_exist")
     expect(entry).toBeNull()
   })
+
+  test("auto-stamps a top-level created: timestamp", () => {
+    const repo = makeTempGitRepo()
+    const filePath = saveMemory(repo, "stamped", "Stamped", "Auto created", "user", "Body")
+
+    const raw = readFileSync(filePath, "utf-8")
+    expect(raw).toMatch(/^created: \d{4}-\d{2}-\d{2}T/m)
+    const entry = readMemory(repo, "stamped")
+    expect(entry!.created).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+  })
+
+  test("preserves a caller-supplied created: (consolidation path)", () => {
+    const repo = makeTempGitRepo()
+    const oldDate = "2025-01-02T03:04:05.000Z"
+    saveMemory(repo, "merged", "Merged", "Keeps old date", "project", "Body", undefined, oldDate)
+
+    const entry = readMemory(repo, "merged")
+    expect(entry!.created).toBe(oldDate)
+  })
 })
 
 describe("deleteMemory", () => {

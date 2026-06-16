@@ -14,6 +14,7 @@ import {
   MEMORY_TYPES,
 } from "./memory.js"
 import { getMemoryDir } from "./paths.js"
+import { saveHarnessFeedback, HARNESS_FEEDBACK_CATEGORIES } from "./harness.js"
 
 // Per-turn derived state — overwritten each time messages.transform fires.
 // This replaces the old process-global session Maps so that compact naturally
@@ -321,6 +322,11 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
     },
 
     "tool.execute.after": async (input, output) => {
+      if (input.tool === "harness_feedback") {
+        const title = typeof input.args?.title === "string" ? input.args.title : undefined
+        if (title) output.title = `harness: ${title}`
+        return
+      }
       if (!input.tool.startsWith("memory_")) return
       const title = buildMemoryToolTitle(input.tool, input.args, input.callID)
       if (title) output.title = title
@@ -436,6 +442,14 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
             .describe(
               "Memory content. For feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines",
             ),
+          created: tool.schema
+            .string()
+            .optional()
+            .describe(
+              "OMIT this normally — `created` is auto-stamped to now. Set it ONLY when consolidating duplicate " +
+                "memories: pass the oldest source memory's `created` value (an ISO-8601 timestamp) so the manifest " +
+                "sort order stays accurate after the merge.",
+            ),
         },
         async execute(args, ctx) {
           // ToolContext carries the originating sessionID; record it as
@@ -453,6 +467,7 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
             args.type,
             args.content,
             originSessionId,
+            args.created,
           )
           return `Memory saved to ${filePath}`
         },
@@ -483,7 +498,8 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
             return "No memories saved yet."
           }
           const lines = entries.map(
-            (e) => `- **${e.name}** (${e.type}) [${e.fileName}]: ${e.description}`,
+            (e) =>
+              `- **${e.name}** (${e.type}) [${e.fileName}]${e.created ? ` · created ${e.created.slice(0, 10)}` : ""}: ${e.description}`,
           )
           return `${entries.length} memories found:\n${lines.join("\n")}`
         },
@@ -520,7 +536,46 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
           if (!entry) {
             return `Memory "${args.file_name}" not found.`
           }
-          return `# ${entry.name}\n**Type:** ${entry.type}\n**Description:** ${entry.description}\n\n${entry.content}`
+          const createdLine = entry.created ? `\n**Created:** ${entry.created}` : ""
+          return `# ${entry.name}\n**Type:** ${entry.type}\n**Description:** ${entry.description}${createdLine}\n\n${entry.content}`
+        },
+      }),
+
+      harness_feedback: tool({
+        description:
+          "Record feedback for the HARNESS DEVELOPER (not agent memory). Use this — " +
+          "instead of memory_save — when a finding is about how YOU or your skills/tools " +
+          "BEHAVED, or how the harness should change: tool-use inefficiency (redundant " +
+          "reads, retry loops, errors not surfacing), a skill that described instead of " +
+          "acted, a missing background loop, an unclear tool description, or anything whose " +
+          "fix is a diff to the system prompt / agent config / a skill rather than a fact " +
+          "to recall next session. These entries are never recalled into agent context.",
+        args: {
+          title: tool.schema.string().describe("Short headline for the observation"),
+          category: tool.schema
+            .enum(HARNESS_FEEDBACK_CATEGORIES)
+            .describe(
+              "tool-efficiency | agent-behavior | skill-design | harness-config | other",
+            ),
+          body: tool.schema
+            .string()
+            .describe(
+              "What was observed and the suggested harness/prompt/skill change. Be concrete.",
+            ),
+        },
+        async execute(args, ctx) {
+          const originSessionId =
+            typeof (ctx as { sessionID?: unknown })?.sessionID === "string"
+              ? (ctx as { sessionID?: string }).sessionID
+              : undefined
+          const path = saveHarnessFeedback(
+            memoryRoot,
+            args.title,
+            args.category,
+            args.body,
+            originSessionId,
+          )
+          return `Harness feedback recorded in ${path} (not saved as memory).`
         },
       }),
     },

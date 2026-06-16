@@ -94,7 +94,7 @@ describe("buildMemorySystemPrompt", () => {
     const repo = makeTempGitRepo()
     const prompt = buildMemorySystemPrompt(repo)
     expect(prompt).toContain("```markdown")
-    expect(prompt).toContain("name: {{memory name}}")
+    expect(prompt).toContain("name: {{short-kebab-case-slug}}")
     // Type lives under the nested `metadata:` block, matching Claude Code's
     // current on-disk schema (not the legacy flat top-level `type:`).
     expect(prompt).toContain("metadata:\n  type: {{user, feedback, project, reference}}")
