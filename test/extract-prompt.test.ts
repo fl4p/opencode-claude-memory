@@ -42,6 +42,15 @@ describe("EXTRACT_PROMPT — btw-capture invariants (deterministic, no keys)", (
       expect(HOOK).toContain("USER-CAPTURE: DISABLED")
       expect(HOOK).toContain("USER-CAPTURE: ENABLED") // the opt-in branch still exists
     })
+    test("an explicit 'remember/always/never' directive pierces the opt-in (but never redaction)", () => {
+      // The opt-in suppresses GUESSING a profile, not honoring an explicit
+      // "remember I'm a Go dev". Without this carve-out the backstop would
+      // silently drop a deliberate user request. Counterpart: an incidental
+      // aside is still suppressed (the user-suppression eval fixture).
+      expect(HOOK).toContain("EXPLICIT-DIRECTIVE RULE")
+      expect(HOOK).toMatch(/PIERCES the USER-CAPTURE default-off/)
+      expect(HOOK).toMatch(/does NOT pierce the REDACTION RULE/)
+    })
   })
 
   describe("credential redaction: pointers opt-out (on), secret VALUES never", () => {
