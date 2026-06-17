@@ -69,3 +69,44 @@ describe("EXTRACT_PROMPT — btw-capture invariants (deterministic, no keys)", (
     expect(HOOK).toMatch(/memory.*notes.*knowledge system.*INCLUDING.*this very session/s)
   })
 })
+
+// Regression: replaying the "Non-focused tile fade" session (ses_12e18f166…)
+// through the production --fork path produced a FABRICATED feedback memory. The
+// session was entirely about UI tiles, but the model read the agent's own
+// `reasoning` blocks ("I need to create an anchored summary…") and invented a
+// verbatim USER quote ("the summaries are helpful but you don't need to maintain
+// the entire session history…") that appears nowhere in any user turn. Root
+// cause: the --fork transcript includes the agent's reasoning, undelimited, and
+// the prompt did not forbid attributing reasoning/assistant text to the user.
+// The ATTRIBUTION RULE closes this WITHOUT stripping reasoning — reasoning stays
+// visible because it is the core signal for Phase 1 (harness feedback about agent
+// behavior); it just can no longer be misquoted as the user in Phase 2.
+describe("EXTRACT_PROMPT — ATTRIBUTION RULE (anti-confabulation, deterministic, no keys)", () => {
+  test("the rule exists", () => {
+    expect(HOOK).toContain("ATTRIBUTION RULE (whose words are these)")
+  })
+
+  test("reasoning is KEPT for Phase 1, not stripped (sink-aware: Obj1 needs it)", () => {
+    // The fix must not blind harness-feedback to the agent's own reasoning —
+    // that is exactly where "the agent went wrong" lives.
+    expect(HOOK).toMatch(/legitimate input for Phase 1 when judging how the agent behaved/)
+  })
+
+  test("reasoning / assistant / tool / summary text is NEVER a user statement", () => {
+    expect(HOOK).toMatch(/Treat reasoning and assistant text as output FROM the agent[^]*NEVER a user statement/)
+    expect(HOOK).toContain(
+      "attribute reasoning, an assistant message, a tool result, or a summary the agent itself wrote as if the user said it",
+    )
+  })
+
+  test("user/feedback evidence must come from a real, verbatim user turn", () => {
+    expect(HOOK).toContain("must come from a real USER turn that appears verbatim above")
+    // ties back to the pre-existing EVIDENCE RULE rather than introducing a rival gate
+    expect(HOOK).toMatch(/the EVIDENCE RULE is not met — do not save/)
+  })
+
+  test("a gist-quote that is not verbatim is explicitly a fabrication", () => {
+    expect(HOOK).toContain("Never manufacture a quote")
+    expect(HOOK).toMatch(/does not appear verbatim in a user turn is a fabrication, even if it captures the gist/)
+  })
+})
