@@ -323,11 +323,17 @@ Scan the conversation for observations about how the AGENT, its SKILLS, or its T
 Record harness feedback when you see:
 - tool-use inefficiency: redundant file reads, retry loops, errors not surfacing to the agent, thrashing
 - a skill or tool that under-performed: one that only DESCRIBED what to do instead of acting, a missing background/watcher loop, polling too slowly, an unclear tool description, a behavior the user had to correct more than once
-- anything whose fix belongs in a prompt, config, or skill rather than in per-session memory
+- anything whose fix belongs in a prompt, config, or skill rather than in per-session memory — but ONLY when triggered by an inefficiency or misbehavior you OBSERVED the agent exhibit this session, never as a code-review opinion about code the session was discussing
 
 Strong signal: places where the user corrected the agent repeatedly, or was frustrated that the agent or a skill was not doing what it should. Those corrections are harness feedback, NOT user preferences and NOT memory.
 
 If Phase 1 finds nothing, record nothing and move on. That is common and fine.
+
+PHASE-1 OBSERVATION RULE: harness_feedback must describe behavior that ACTUALLY OCCURRED in THIS conversation — a specific tool call, retry loop, surfaced error, or user correction you can point to in the transcript above. Cite that observed event in the content. Do NOT record a hypothesized, would-be-better, or merely suggested improvement, and do NOT fabricate a plausible fix: if you cannot point to the turn or tool call where the problem actually happened, record nothing. When the conversation SUBJECT is agent, harness, skill, or tooling code (a review, design, or discussion session), that subject matter is NOT harness_feedback — review opinions about the code under discussion are the session deliverable, not feedback about how the agent behaved while running it. Default to recording nothing; zero harness_feedback is the common and expected outcome.
+
+EXAMPLES.
+- DO record: Agent re-ran the same `grep` over one file across turns 4/7/9 because results were not retained — tool-efficiency (an event in the transcript).
+- DO NOT record: memory_save filename validation is strict; the error should suggest a flat filename (a code-review suggestion about code under discussion — no observed agent misbehavior; this is fabricated harness feedback).
 
 # Phase 2 — Memory (durable facts only)
 

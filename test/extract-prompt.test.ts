@@ -127,3 +127,31 @@ describe("EXTRACT_PROMPT — PROVENANCE RULE (no-COMMITS-block hash confabulatio
     expect(HOOK).toMatch(/never reuse a hash from this prompt or from another session/)
   })
 })
+
+describe("EXTRACT_PROMPT — PHASE-1 OBSERVATION RULE (abstain delta, no spurious harness_feedback)", () => {
+  // Local Qwen-30B fired a fabricated harness_feedback on review/design sessions:
+  // it promoted a code-review opinion about the code UNDER DISCUSSION into harness
+  // feedback, and invented would-be-better fixes for problems that never occurred.
+  // The eval measured this on the harness-feedback / btw-model-alias fixtures.
+  // These guards lock the three deltas that gate it (no model, no keys).
+  test("Phase 1 requires the feedback to describe behavior that ACTUALLY OCCURRED", () => {
+    expect(HOOK).toContain("PHASE-1 OBSERVATION RULE")
+    expect(HOOK).toMatch(/ACTUALLY OCCURRED in THIS conversation/)
+    expect(HOOK).toMatch(/if you cannot point to the turn or tool call where the problem actually happened, record nothing/)
+  })
+
+  test("the session SUBJECT (reviewing agent/skill/tool code) is not itself harness_feedback", () => {
+    expect(HOOK).toMatch(/the conversation SUBJECT is agent, harness, skill, or tooling code/)
+    expect(HOOK).toMatch(/review opinions about the code under discussion are the session deliverable/)
+  })
+
+  test("the catch-all bullet is gated on an OBSERVED misbehavior, not a code-review opinion", () => {
+    expect(HOOK).toMatch(/ONLY when triggered by an inefficiency or misbehavior you OBSERVED the agent exhibit this session/)
+    expect(HOOK).toMatch(/never as a code-review opinion about code the session was discussing/)
+  })
+
+  test("a few-shot DO-NOT-record example inoculates the observed fabrication", () => {
+    expect(HOOK).toContain("fabricated harness feedback")
+    expect(HOOK).toMatch(/no observed agent misbehavior/)
+  })
+})
