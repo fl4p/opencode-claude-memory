@@ -110,3 +110,20 @@ describe("EXTRACT_PROMPT — ATTRIBUTION RULE (anti-confabulation, deterministic
     expect(HOOK).toMatch(/does not appear verbatim in a user turn is a fabrication, even if it captures the gist/)
   })
 })
+
+describe("EXTRACT_PROMPT — PROVENANCE RULE (no-COMMITS-block hash confabulation)", () => {
+  // Regression: a local/direct extraction with NO COMMITS block injected echoed
+  // the rule's own example hash ("a1b2c3d") as if it were a real commit. The
+  // example must not be a copyable real-looking hash, and the rule must tell the
+  // model to cite NO hash when no COMMITS block is present.
+  test("example hash is a non-copyable placeholder, not a real-looking sha", () => {
+    expect(HOOK).not.toContain("fixed in a1b2c3d")
+    expect(HOOK).toContain("fixed in <commit>")
+  })
+
+  test("no COMMITS block => cite no hash, do not reuse the placeholder or a stale hash", () => {
+    expect(HOOK).toContain("If NO COMMITS block appears in this message")
+    expect(HOOK).toMatch(/do NOT write any commit hash/)
+    expect(HOOK).toMatch(/never reuse a hash from this prompt or from another session/)
+  })
+})
