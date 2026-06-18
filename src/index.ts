@@ -140,12 +140,31 @@ function extractRecentTools(
   return tools
 }
 
+// Settings passed via the plugin's `options` bag in opencode.json (the native
+// per-plugin config surface). Captured once when the plugin loads. Environment
+// variables still take precedence over these. Only recall* is consumed here —
+// extract*/dream* run in the wrapper (bin/opencode-memory), which reads the same
+// options block from opencode.json itself.
+let pluginRecallModel: string | undefined
+let pluginRecallAgent: string | undefined
+
+function asOptionString(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim() ? v.trim() : undefined
+}
+
+// Always (re)set on construction — never early-return on missing options, or
+// stale recall settings from a prior construction would leak in (module state).
+function recordPluginOptions(options: Record<string, unknown> | undefined): void {
+  pluginRecallModel = asOptionString(options?.recallModel)
+  pluginRecallAgent = asOptionString(options?.recallAgent)
+}
+
 function getRecallAgent(): string {
-  return process.env.OPENCODE_MEMORY_RECALL_AGENT || "opencode-memory-recall"
+  return process.env.OPENCODE_MEMORY_RECALL_AGENT || pluginRecallAgent || "opencode-memory-recall"
 }
 
 function getRecallModel(): { providerID: string; modelID: string } | undefined {
-  const raw = process.env.OPENCODE_MEMORY_RECALL_MODEL
+  const raw = process.env.OPENCODE_MEMORY_RECALL_MODEL || pluginRecallModel
   if (!raw) return undefined
 
   const slashIdx = raw.indexOf("/")
@@ -293,8 +312,9 @@ function getCallID(ctx: unknown): string | undefined {
   return typeof v === "string" ? v : undefined
 }
 
-export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
+export const MemoryPlugin: Plugin = async ({ worktree, directory, client }, options) => {
   directory ??= worktree
+  recordPluginOptions(options)
   const memoryRoot = resolveMemoryRoot(worktree, directory)
   getMemoryDir(memoryRoot)
 

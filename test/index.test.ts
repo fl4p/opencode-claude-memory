@@ -92,6 +92,45 @@ function makeCompletedSelectorClient(selections: string[][]) {
   }
 }
 
+type ConfigHook = (config: { agent?: Record<string, Record<string, unknown>> }) => Promise<void>
+
+describe("MemoryPlugin recall settings from plugin options", () => {
+  const ORIG_AGENT = process.env.OPENCODE_MEMORY_RECALL_AGENT
+  const ORIG_MODEL = process.env.OPENCODE_MEMORY_RECALL_MODEL
+  afterEach(() => {
+    if (ORIG_AGENT === undefined) delete process.env.OPENCODE_MEMORY_RECALL_AGENT
+    else process.env.OPENCODE_MEMORY_RECALL_AGENT = ORIG_AGENT
+    if (ORIG_MODEL === undefined) delete process.env.OPENCODE_MEMORY_RECALL_MODEL
+    else process.env.OPENCODE_MEMORY_RECALL_MODEL = ORIG_MODEL
+  })
+
+  // The config hook registers the recall agent under getRecallAgent() — an
+  // observable proxy for the options→recall wiring (recordPluginOptions).
+  async function registeredAgentName(options: unknown): Promise<string> {
+    const repo = makeTempGitRepo()
+    const plugin = await MemoryPlugin({ worktree: repo, directory: repo } as never, options as never)
+    const config = plugin.config as unknown as ConfigHook
+    const cfg: { agent?: Record<string, Record<string, unknown>> } = {}
+    await config(cfg)
+    return Object.keys(cfg.agent ?? {})[0] ?? ""
+  }
+
+  test("registers the recall agent under options.recallAgent", async () => {
+    delete process.env.OPENCODE_MEMORY_RECALL_AGENT
+    expect(await registeredAgentName({ recallAgent: "custom-recall" })).toBe("custom-recall")
+  })
+
+  test("falls back to the default recall agent when no option or env is set", async () => {
+    delete process.env.OPENCODE_MEMORY_RECALL_AGENT
+    expect(await registeredAgentName({})).toBe("opencode-memory-recall")
+  })
+
+  test("env OPENCODE_MEMORY_RECALL_AGENT overrides options.recallAgent", async () => {
+    process.env.OPENCODE_MEMORY_RECALL_AGENT = "env-recall"
+    expect(await registeredAgentName({ recallAgent: "custom-recall" })).toBe("env-recall")
+  })
+})
+
 describe("MemoryPlugin system transform", () => {
   test("uses directory as memory root when OpenCode reports root worktree", async () => {
     const project = makeTempProject()

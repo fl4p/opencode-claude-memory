@@ -36,6 +36,12 @@
 #   OPENCODE_MEMORY_AUTODREAM_MODEL=...       — Auto-dream model override
 #   OPENCODE_MEMORY_AUTODREAM_AGENT=...       — Auto-dream agent override
 #   OPENCODE_MEMORY_DIR=...                   — Override working directory for opencode
+#   OPENCODE_MEMORY_PRINT_SETTINGS=1          — Print resolved extract/dream/recall settings and exit
+#
+# The extraction/dream model+agent can also be set persistently (without env vars)
+# in the plugin `options` block of opencode.json — keys extractModel/extractAgent/
+# dreamModel/dreamAgent (recallModel/recallAgent are read in-process by the plugin).
+# Precedence: env var > opencode.json options > default (dream falls back to extract).
 #
 
 set -euo pipefail
@@ -249,6 +255,91 @@ extract_working_dir_from_args() {
   return 1
 }
 
+# Read extract/dream model+agent from the plugin `options` block in opencode.json
+# (the native per-plugin settings surface). Reads the SAME layered config opencode
+# does: global (~/.config/opencode) lowest, then each ancestor dir up to the working
+# dir, highest wins; tolerates jsonc (// and /* */ comments + trailing commas) and
+# every entry shape ("pkg" | ["pkg",{opts}] | {"package":..,"options":{..}}).
+# Prints exactly 4 lines: extractModel, extractAgent, dreamModel, dreamAgent (blank
+# when unset). Best-effort — never fails the wrapper. env vars always override these.
+read_opencode_plugin_settings() {
+  python3 - "${1:-$PWD}" <<'PY' 2>/dev/null
+import json, os, re, sys
+
+def strip_jsonc(s):
+    out, i, n = [], 0, len(s)
+    in_str = esc = False
+    while i < n:
+        c = s[i]
+        if in_str:
+            out.append(c)
+            if esc: esc = False
+            elif c == '\\': esc = True
+            elif c == '"': in_str = False
+            i += 1; continue
+        if c == '"':
+            in_str = True; out.append(c); i += 1; continue
+        if c == '/' and i + 1 < n and s[i+1] == '/':
+            while i < n and s[i] != '\n': i += 1
+            continue
+        if c == '/' and i + 1 < n and s[i+1] == '*':
+            i += 2
+            while i + 1 < n and not (s[i] == '*' and s[i+1] == '/'): i += 1
+            i += 2; continue
+        out.append(c); i += 1
+    return re.sub(r',(\s*[}\]])', r'\1', ''.join(out))
+
+KEYS = ("extractModel", "extractAgent", "dreamModel", "dreamAgent")
+resolved = {k: "" for k in KEYS}
+
+def absorb(opts):
+    if isinstance(opts, dict):
+        for k in KEYS:
+            v = opts.get(k)
+            if isinstance(v, str) and v.strip():
+                resolved[k] = v.strip()
+
+def scan(cfg):
+    if not isinstance(cfg, dict): return
+    entries = []
+    for key in ("plugin", "plugins"):
+        v = cfg.get(key)
+        if isinstance(v, list): entries.extend(v)
+    for e in entries:
+        if isinstance(e, dict):
+            absorb(e.get("options"))
+        elif isinstance(e, list) and len(e) >= 2:   # ["pkg", {options}] tuple form
+            absorb(e[1])
+
+try:
+    wd = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.getcwd())
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    dirs = [os.path.join(xdg, "opencode")]           # global, lowest priority
+    anc, cur = [], wd
+    while True:
+        anc.append(cur)
+        parent = os.path.dirname(cur)
+        if parent == cur: break
+        cur = parent
+    dirs += list(reversed(anc))                      # root .. working dir, highest last
+    for d in dirs:
+        for name in ("config.json", "opencode.json", "opencode.jsonc"):
+            try:
+                with open(os.path.join(d, name), encoding="utf-8") as f:
+                    raw = f.read()
+            except OSError:
+                continue
+            try:
+                scan(json.loads(strip_jsonc(raw)))
+            except Exception:
+                continue
+except Exception:
+    pass
+
+sys.stdout.write("\n".join(resolved[k] for k in KEYS) + "\n")
+PY
+}
+
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -269,12 +360,42 @@ AUTODREAM_ENABLED="${OPENCODE_MEMORY_AUTODREAM:-1}"
 AUTODREAM_MIN_HOURS="${OPENCODE_MEMORY_AUTODREAM_MIN_HOURS:-24}"
 AUTODREAM_MIN_SESSIONS="${OPENCODE_MEMORY_AUTODREAM_MIN_SESSIONS:-5}"
 AUTODREAM_SCAN_LIMIT="${OPENCODE_MEMORY_AUTODREAM_SCAN_LIMIT:-200}"
-AUTODREAM_MODEL="${OPENCODE_MEMORY_AUTODREAM_MODEL:-$EXTRACT_MODEL}"
-AUTODREAM_AGENT="${OPENCODE_MEMORY_AUTODREAM_AGENT:-$EXTRACT_AGENT}"
+# env layer only here; opencode.json fill + the extract-model fallback are applied
+# below, once WORKING_DIR is known (so dream precedence is env > opencode.json > extract).
+AUTODREAM_MODEL="${OPENCODE_MEMORY_AUTODREAM_MODEL:-}"
+AUTODREAM_AGENT="${OPENCODE_MEMORY_AUTODREAM_AGENT:-}"
 AUTODREAM_STALE_LOCK_SECS=$((60 * 60))
 SESSION_WAIT_SECONDS="${OPENCODE_MEMORY_SESSION_WAIT_SECONDS:-5}"
 
 WORKING_DIR="${OPENCODE_MEMORY_DIR:-$(extract_working_dir_from_args "$@" || pwd)}"
+
+# Fill any model/agent the environment did not set from the opencode.json plugin
+# `options` block (the native settings surface). env always wins; dream falls back
+# to the extract model (preserving prior behavior) when neither env nor opencode.json
+# specifies one. Precedence: env > opencode.json options > (dream: the extract model).
+if [ -z "$EXTRACT_MODEL" ] || [ -z "$EXTRACT_AGENT" ] || [ -z "$AUTODREAM_MODEL" ] || [ -z "$AUTODREAM_AGENT" ]; then
+  # `|| true` on each read so an EOF (e.g. python3 missing → no output) does not
+  # trip `set -e`; the vars simply stay empty and we fall back to defaults.
+  { IFS= read -r _cfg_extract_model || true
+    IFS= read -r _cfg_extract_agent || true
+    IFS= read -r _cfg_dream_model || true
+    IFS= read -r _cfg_dream_agent || true
+  } < <(read_opencode_plugin_settings "$WORKING_DIR") || true
+  EXTRACT_MODEL="${EXTRACT_MODEL:-$_cfg_extract_model}"
+  EXTRACT_AGENT="${EXTRACT_AGENT:-$_cfg_extract_agent}"
+  AUTODREAM_MODEL="${AUTODREAM_MODEL:-${_cfg_dream_model:-$EXTRACT_MODEL}}"
+  AUTODREAM_AGENT="${AUTODREAM_AGENT:-${_cfg_dream_agent:-$EXTRACT_AGENT}}"
+  unset _cfg_extract_model _cfg_extract_agent _cfg_dream_model _cfg_dream_agent
+fi
+
+# Verify resolved settings (env + opencode.json) without launching a session.
+if [ "${OPENCODE_MEMORY_PRINT_SETTINGS:-0}" = "1" ]; then
+  printf 'extract.model=%s\nextract.agent=%s\ndream.model=%s\ndream.agent=%s\nrecall.model=%s\n' \
+    "${EXTRACT_MODEL:-<opencode default>}" "${EXTRACT_AGENT:-<opencode default>}" \
+    "${AUTODREAM_MODEL:-<opencode default>}" "${AUTODREAM_AGENT:-<opencode default>}" \
+    "${OPENCODE_MEMORY_RECALL_MODEL:-<opencode.json options.recallModel, else default>}"
+  exit 0
+fi
 
 TMP_BASE_DIR="${TMPDIR:-/tmp}"
 while [ "$TMP_BASE_DIR" != "/" ] && [ "${TMP_BASE_DIR%/}" != "$TMP_BASE_DIR" ]; do

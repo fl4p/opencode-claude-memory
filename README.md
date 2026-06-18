@@ -225,6 +225,53 @@ Yes. Set `OPENCODE_MEMORY_AUTODREAM=0`. You can also tune gates with:
 - `OPENCODE_MEMORY_AUTODREAM_MODEL`: override model used for auto-dream
 - `OPENCODE_MEMORY_AUTODREAM_AGENT`: override agent used for auto-dream
 
+### Model settings via `opencode.json` (recommended)
+
+Rather than exporting env vars, you can declare the extraction, dream, and recall
+models persistently in the plugin's `options` block in `opencode.json` — the native
+per-plugin settings surface. opencode merges global (`~/.config/opencode`) and
+project config; project wins, and **environment variables still override everything**.
+
+```jsonc
+{
+  "plugin": [
+    {
+      "package": "opencode-claude-memory",
+      "options": {
+        "extractModel": "opencode/big-pickle",       // post-session extraction
+        "dreamModel":   "opencode/big-pickle",        // auto-dream consolidation (defaults to extractModel)
+        "recallModel":  "openai/gpt-4o-mini",         // LLM recall selection
+        "extractAgent": "...",                         // optional agent overrides
+        "dreamAgent":   "...",
+        "recallAgent":  "..."
+      }
+    }
+  ]
+}
+```
+
+Precedence per setting: **env var → `opencode.json` options → built-in default**
+(and `dreamModel` falls back to `extractModel` when neither is set).
+
+> **opencode version note.** Recent opencode uses the object entry shape shown above
+> (`{ "package": ..., "options": {...} }`). On opencode `1.17.x` stable the entry is a
+> **tuple**: `"plugin": [["opencode-claude-memory", { "extractModel": "..." }]]`. The
+> wrapper accepts both (plus the `"plugins"` plural key); write whichever your opencode
+> version's config schema expects.
+
+Verify what actually resolved (no session launched):
+
+```sh
+OPENCODE_MEMORY_PRINT_SETTINGS=1 opencode run
+# extract.model=opencode/big-pickle
+# dream.model=opencode/big-pickle
+# recall.model=...
+```
+
+> Note: `extractModel`/`dreamModel` are read by the post-session wrapper directly from
+> `opencode.json`; `recallModel`/`recallAgent` are consumed in-process by the plugin.
+> All share the one `options` block.
+
 ### Logs
 
 Logs are written to `$TMPDIR/opencode-memory-logs/`:
