@@ -243,7 +243,8 @@ project config; project wins, and **environment variables still override everyth
         "recallModel":  "openai/gpt-4o-mini",         // LLM recall selection
         "extractAgent": "...",                         // optional agent overrides
         "dreamAgent":   "...",
-        "recallAgent":  "..."
+        "recallAgent":  "...",
+        "extraMemoryRoots": ["/abs/path/to/other-repo"] // see "Cross-repo memory" below
       }
     }
   ]
@@ -271,6 +272,37 @@ OPENCODE_MEMORY_PRINT_SETTINGS=1 opencode run
 > Note: `extractModel`/`dreamModel` are read by the post-session wrapper directly from
 > `opencode.json`; `recallModel`/`recallAgent` are consumed in-process by the plugin.
 > All share the one `options` block.
+
+### Cross-repo memory (`extraMemoryRoots`)
+
+By default a session's memory is pinned to the repo it launched in — reading files
+from another repo does **not** load that repo's memory. To additionally surface one
+or more *other* repos' memory in a session, declare them:
+
+```jsonc
+"options": { "extraMemoryRoots": ["/Users/me/dev/other-repo"] }
+```
+
+or via env (replaces the option when set; entries split on `, ; :` or newline):
+
+```sh
+OPENCODE_MEMORY_EXTRA_ROOTS="/Users/me/dev/other-repo" opencode
+```
+
+What this does:
+- **Read-only index injection** — each declared repo's memory index is appended to the
+  Auto Memory system block under an `## Additional memory index — <path>` heading. (Index
+  only; the LLM recall selector still runs against the session repo.)
+- **Targeted tool access** — every `memory_*` tool takes an optional `root` argument. Pass
+  a declared repo's path to read/search/list, or to **save/delete** in that repo. Omitting
+  `root` always means the session's own repo.
+
+Safety: a `root` that is **not** the session repo or a declared `extraMemoryRoots` entry is
+**rejected** — the model cannot write memory to an arbitrary path. Paths are matched by
+canonical git root, so a subdir or worktree of an allowed repo resolves correctly.
+
+Scope: this affects **in-session** recall and tools only. Post-session extraction and
+auto-dream still operate on the session's own repo.
 
 ### Logs
 

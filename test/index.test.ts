@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
@@ -128,6 +128,118 @@ describe("MemoryPlugin recall settings from plugin options", () => {
   test("env OPENCODE_MEMORY_RECALL_AGENT overrides options.recallAgent", async () => {
     process.env.OPENCODE_MEMORY_RECALL_AGENT = "env-recall"
     expect(await registeredAgentName({ recallAgent: "custom-recall" })).toBe("env-recall")
+  })
+})
+
+describe("MemoryPlugin extra memory roots", () => {
+  const ORIG_ROOTS = process.env.OPENCODE_MEMORY_EXTRA_ROOTS
+  const ORIG_CFG = process.env.CLAUDE_CONFIG_DIR
+
+  // Isolate the on-disk memory store per test so these don't pollute the dev's
+  // real ~/.claude/projects, and clear any leaked env extra-roots.
+  beforeEach(() => {
+    delete process.env.OPENCODE_MEMORY_EXTRA_ROOTS
+    const cfg = mkdtempSync(join(tmpdir(), "index-test-claude-"))
+    tempDirs.push(cfg)
+    process.env.CLAUDE_CONFIG_DIR = cfg
+  })
+  afterEach(() => {
+    if (ORIG_ROOTS === undefined) delete process.env.OPENCODE_MEMORY_EXTRA_ROOTS
+    else process.env.OPENCODE_MEMORY_EXTRA_ROOTS = ORIG_ROOTS
+    if (ORIG_CFG === undefined) delete process.env.CLAUDE_CONFIG_DIR
+    else process.env.CLAUDE_CONFIG_DIR = ORIG_CFG
+  })
+
+  test("memory_list targets a declared extra root, defaults to session repo, rejects undeclared", async () => {
+    const sessionRepo = makeTempGitRepo()
+    const otherRepo = makeTempGitRepo()
+    const strayRepo = makeTempGitRepo()
+    saveMemory(sessionRepo, "s_mem", "Session Mem", "in session", "user", "session content")
+    saveMemory(otherRepo, "o_mem", "Other Mem", "in other", "project", "other content")
+
+    const plugin = await MemoryPlugin(
+      { worktree: sessionRepo, directory: sessionRepo } as never,
+      { extraMemoryRoots: [otherRepo] } as never,
+    )
+    const tools = plugin.tool as never as Record<string, { execute(args: unknown, ctx: unknown): Promise<string> }>
+
+    const def = await tools.memory_list!.execute({}, { callID: "a" })
+    expect(def).toContain("Session Mem")
+    expect(def).not.toContain("Other Mem")
+
+    const other = await tools.memory_list!.execute({ root: otherRepo }, { callID: "b" })
+    expect(other).toContain("Other Mem")
+    expect(other).not.toContain("Session Mem")
+
+    const rejected = await tools.memory_list!.execute({ root: strayRepo }, { callID: "c" })
+    expect(rejected).toContain("not allowed")
+  })
+
+  test("memory_save honors a declared root and refuses an undeclared one", async () => {
+    const sessionRepo = makeTempGitRepo()
+    const otherRepo = makeTempGitRepo()
+    const strayRepo = makeTempGitRepo()
+
+    const plugin = await MemoryPlugin(
+      { worktree: sessionRepo } as never,
+      { extraMemoryRoots: [otherRepo] } as never,
+    )
+    const tools = plugin.tool as never as Record<string, { execute(args: unknown, ctx: unknown): Promise<string> }>
+
+    const okOther = await tools.memory_save!.execute(
+      { file_name: "x", name: "X", description: "d", type: "reference", content: "c", root: otherRepo },
+      { callID: "s1" },
+    )
+    expect(okOther).toContain("Memory saved")
+    expect(okOther).toContain(getMemoryDir(otherRepo))
+
+    const refused = await tools.memory_save!.execute(
+      { file_name: "y", name: "Y", description: "d", type: "reference", content: "c", root: strayRepo },
+      { callID: "s2" },
+    )
+    expect(refused).toContain("not allowed")
+    // The stray repo must have received nothing.
+    const strayPlugin = await MemoryPlugin({ worktree: strayRepo } as never)
+    const strayTools = strayPlugin.tool as never as Record<string, { execute(a: unknown, c: unknown): Promise<string> }>
+    expect(await strayTools.memory_list!.execute({}, { callID: "s3" })).toContain("No memories")
+  })
+
+  test("system transform surfaces a declared extra root's index read-only", async () => {
+    const sessionRepo = makeTempGitRepo()
+    const otherRepo = makeTempGitRepo()
+    saveMemory(otherRepo, "ext_mem", "External Mem", "in other repo", "reference", "ext content")
+
+    const plugin = await MemoryPlugin(
+      { worktree: sessionRepo } as never,
+      { extraMemoryRoots: [otherRepo] } as never,
+    )
+    const transform = plugin["experimental.chat.system.transform"] as unknown as SystemTransform
+    const output = { system: [] as string[] }
+    await transform({ model: "test-model", sessionID: "ses_extra" }, output)
+
+    expect(output.system).toHaveLength(1)
+    expect(output.system[0]).toContain("## Additional memory index")
+    expect(output.system[0]).toContain(otherRepo)
+    expect(output.system[0]).toContain("ext_mem")
+  })
+
+  test("env OPENCODE_MEMORY_EXTRA_ROOTS is honored and replaces the option", async () => {
+    const sessionRepo = makeTempGitRepo()
+    const envRepo = makeTempGitRepo()
+    const optRepo = makeTempGitRepo()
+    saveMemory(envRepo, "env_mem", "Env Mem", "via env", "user", "env content")
+    saveMemory(optRepo, "opt_mem", "Opt Mem", "via opt", "user", "opt content")
+    process.env.OPENCODE_MEMORY_EXTRA_ROOTS = envRepo
+
+    const plugin = await MemoryPlugin(
+      { worktree: sessionRepo } as never,
+      { extraMemoryRoots: [optRepo] } as never,
+    )
+    const tools = plugin.tool as never as Record<string, { execute(args: unknown, ctx: unknown): Promise<string> }>
+
+    expect(await tools.memory_list!.execute({ root: envRepo }, { callID: "e" })).toContain("Env Mem")
+    // env replaced the option, so the option's repo is no longer allowed
+    expect(await tools.memory_list!.execute({ root: optRepo }, { callID: "f" })).toContain("not allowed")
   })
 })
 

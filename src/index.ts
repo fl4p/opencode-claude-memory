@@ -4,7 +4,7 @@ import { parse, resolve } from "path"
 import { buildMemorySystemPrompt } from "./prompt.js"
 import { formatRecalledMemories, recallSelectedMemories, type RecalledMemory } from "./recall.js"
 import { isSupportedRecallSelectorClient, selectRelevantMemoryFilenames, type SessionClient } from "./recallSelector.js"
-import { scanMemoryFiles, type MemoryHeader } from "./memoryScan.js"
+import { scanMemoryFiles, getMemoryManifest, type MemoryHeader } from "./memoryScan.js"
 import {
   saveMemory,
   deleteMemory,
@@ -13,7 +13,7 @@ import {
   readMemory,
   MEMORY_TYPES,
 } from "./memory.js"
-import { getMemoryDir } from "./paths.js"
+import { getMemoryDir, findCanonicalGitRoot } from "./paths.js"
 import { saveHarnessFeedback, HARNESS_FEEDBACK_CATEGORIES } from "./harness.js"
 
 // Per-turn derived state — overwritten each time messages.transform fires.
@@ -147,9 +147,17 @@ function extractRecentTools(
 // options block from opencode.json itself.
 let pluginRecallModel: string | undefined
 let pluginRecallAgent: string | undefined
+let pluginExtraRoots: string[] = []
 
 function asOptionString(v: unknown): string | undefined {
   return typeof v === "string" && v.trim() ? v.trim() : undefined
+}
+
+function asOptionStringArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return []
+  return v
+    .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+    .map((x) => x.trim())
 }
 
 // Always (re)set on construction — never early-return on missing options, or
@@ -157,6 +165,22 @@ function asOptionString(v: unknown): string | undefined {
 function recordPluginOptions(options: Record<string, unknown> | undefined): void {
   pluginRecallModel = asOptionString(options?.recallModel)
   pluginRecallAgent = asOptionString(options?.recallAgent)
+  pluginExtraRoots = asOptionStringArray(options?.extraMemoryRoots)
+}
+
+// Additional memory roots whose index is surfaced read-only this session and
+// which the memory_* tools may target via their `root` arg. The env var REPLACES
+// the option when set (scalar precedence, matching getRecallModel). Each entry is
+// a repo path (a git root or any directory); env entries split on , ; : newline.
+function getExtraRoots(): string[] {
+  const env = process.env.OPENCODE_MEMORY_EXTRA_ROOTS
+  if (env && env.trim()) {
+    return env
+      .split(/[,;:\n]/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+  }
+  return pluginExtraRoots
 }
 
 function getRecallAgent(): string {
@@ -318,6 +342,27 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }, opti
   const memoryRoot = resolveMemoryRoot(worktree, directory)
   getMemoryDir(memoryRoot)
 
+  // Resolve a tool's optional `root` arg against the allowlist (this session's
+  // repo + declared extraMemoryRoots). An omitted root means "this session's
+  // repo"; an undeclared root is REJECTED — this is what stops the model from
+  // writing memory to an arbitrary path. Compared by canonical git root so a
+  // subdir/worktree of an allowed repo still resolves.
+  const canonicalRoot = (p: string): string => findCanonicalGitRoot(p) ?? resolve(p)
+  const allowedRoots = (): string[] => [memoryRoot, ...getExtraRoots()]
+  const resolveToolRoot = (rootArg: unknown): { root: string } | { error: string } => {
+    if (typeof rootArg !== "string" || !rootArg.trim()) return { root: memoryRoot }
+    const want = canonicalRoot(rootArg.trim())
+    for (const r of allowedRoots()) {
+      if (canonicalRoot(r) === want) return { root: r }
+    }
+    return {
+      error:
+        `Memory root "${rootArg}" is not allowed. Declare it in opencode.json plugin ` +
+        `options.extraMemoryRoots (or the OPENCODE_MEMORY_EXTRA_ROOTS env var) first. ` +
+        `Allowed roots: ${allowedRoots().join(", ")}`,
+    }
+  }
+
   return {
     config: async (config) => {
       const agentName = getRecallAgent()
@@ -427,9 +472,32 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }, opti
       const recalled = ignoreMemoryContext ? [] : consumeRecallPrefetch(ctx)
 
       const recalledSection = formatRecalledMemories(recalled)
-      const memoryPrompt = buildMemorySystemPrompt(memoryRoot, recalledSection, {
+      let memoryPrompt = buildMemorySystemPrompt(memoryRoot, recalledSection, {
         includeIndex: !ignoreMemoryContext,
       })
+      // Surface declared extra roots read-only (index only — no per-root recall).
+      // Appended to the SAME system string so consumers still see one Auto Memory
+      // block. Suppressed under the ignore-memory gate like the primary index.
+      if (!ignoreMemoryContext) {
+        for (const root of getExtraRoots()) {
+          if (canonicalRoot(root) === canonicalRoot(memoryRoot)) continue
+          let manifest = ""
+          let count = 0
+          try {
+            const m = getMemoryManifest(root)
+            manifest = m.manifest
+            count = m.headers.length
+          } catch {
+            continue
+          }
+          if (count === 0) continue
+          memoryPrompt +=
+            `\n\n## Additional memory index — ${root}\n\n` +
+            `Read-only index of another repo's curated memory. To read an entry, call ` +
+            `memory_read with root:"${root}". Note: memory_save and memory_delete still ` +
+            `target THIS session's repo unless you pass the same root.\n\n${manifest}`
+        }
+      }
       output.system.push(memoryPrompt)
     },
 
@@ -470,8 +538,17 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }, opti
                 "memories: pass the oldest source memory's `created` value (an ISO-8601 timestamp) so the manifest " +
                 "sort order stays accurate after the merge.",
             ),
+          root: tool.schema
+            .string()
+            .optional()
+            .describe(
+              "OMIT normally — defaults to THIS session's repo. Set ONLY to write to another repo whose path is " +
+                "declared in the plugin's extraMemoryRoots; pass that repo's absolute path. Any other path is rejected.",
+            ),
         },
         async execute(args, ctx) {
+          const r = resolveToolRoot(args.root)
+          if ("error" in r) return r.error
           // ToolContext carries the originating sessionID; record it as
           // memory provenance, matching Claude Code's on-disk metadata. The
           // guard keeps the unit-test mock (which passes only { callID }) working.
@@ -480,7 +557,7 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }, opti
               ? (ctx as { sessionID?: string }).sessionID
               : undefined
           const filePath = saveMemory(
-            memoryRoot,
+            r.root,
             args.file_name,
             args.name,
             args.description,
@@ -497,9 +574,15 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }, opti
         description: "Delete a memory that is outdated, wrong, or no longer relevant. Also removes it from the index.",
         args: {
           file_name: tool.schema.string().describe("File name of the memory to delete (with or without .md extension)"),
+          root: tool.schema
+            .string()
+            .optional()
+            .describe("OMIT normally (this session's repo). Set to a declared extraMemoryRoots path to delete there."),
         },
         async execute(args, _ctx) {
-          const deleted = deleteMemory(memoryRoot, args.file_name)
+          const r = resolveToolRoot(args.root)
+          if ("error" in r) return r.error
+          const deleted = deleteMemory(r.root, args.file_name)
           return deleted ? `Memory "${args.file_name}" deleted.` : `Memory "${args.file_name}" not found.`
         },
       }),
@@ -509,9 +592,16 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }, opti
           "List all saved memories with their names, types, and descriptions. " +
           "Use this to check what memories exist before saving a new one (to avoid duplicates) " +
           "or when you need to recall what's been stored.",
-        args: {},
-        async execute(_args, ctx) {
-          const entries = listMemories(memoryRoot)
+        args: {
+          root: tool.schema
+            .string()
+            .optional()
+            .describe("OMIT normally (this session's repo). Set to a declared extraMemoryRoots path to list there."),
+        },
+        async execute(args, ctx) {
+          const r = resolveToolRoot(args.root)
+          if ("error" in r) return r.error
+          const entries = listMemories(r.root)
           const callID = getCallID(ctx)
           if (callID) memoryListCountByCallID.set(callID, entries.length)
           if (entries.length === 0) {
@@ -531,9 +621,15 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }, opti
           "Use this to find relevant memories before answering questions or when the user references past conversations.",
         args: {
           query: tool.schema.string().describe("Search query — searches across name, description, and content"),
+          root: tool.schema
+            .string()
+            .optional()
+            .describe("OMIT normally (this session's repo). Set to a declared extraMemoryRoots path to search there."),
         },
         async execute(args, ctx) {
-          const results = searchMemories(memoryRoot, args.query)
+          const r = resolveToolRoot(args.root)
+          if ("error" in r) return r.error
+          const results = searchMemories(r.root, args.query)
           const callID = getCallID(ctx)
           if (callID) memorySearchCountByCallID.set(callID, results.length)
           if (results.length === 0) {
@@ -550,9 +646,18 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }, opti
         description: "Read the full content of a specific memory file.",
         args: {
           file_name: tool.schema.string().describe("File name of the memory to read (with or without .md extension)"),
+          root: tool.schema
+            .string()
+            .optional()
+            .describe(
+              "OMIT for this session's repo. Set to a declared extraMemoryRoots path (e.g. one shown in an " +
+                "'Additional memory index' block) to read that repo's memory.",
+            ),
         },
         async execute(args, _ctx) {
-          const entry = readMemory(memoryRoot, args.file_name)
+          const r = resolveToolRoot(args.root)
+          if ("error" in r) return r.error
+          const entry = readMemory(r.root, args.file_name)
           if (!entry) {
             return `Memory "${args.file_name}" not found.`
           }
