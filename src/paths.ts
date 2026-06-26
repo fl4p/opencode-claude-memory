@@ -258,9 +258,30 @@ export function isInRepoMemory(worktree: string): boolean {
   return isExistingDir(getLocalMemoryDir(worktree)) // auto: only if already adopted
 }
 
-// True when a write to this worktree's memory must be scrubbed of secret values.
+// True when the in-repo store is active AND not opted into secrets — i.e. an
+// in-repo write must be scrubbed. (Kept as a named predicate for the in-repo case.)
 export function shouldRedactInRepoMemory(worktree: string): boolean {
   return isInRepoMemory(worktree) && !localMemorySecretsAllowed()
+}
+
+// Defense-in-depth for the GLOBAL store. Secret VALUES are allowed there by
+// default (it is the user's private ~/.claude), so a programmatic scrub of the
+// global path is OPT-IN: enable it to run the same deterministic credential
+// scrub on global writes too, for users who want belt-and-suspenders over the
+// prompt-only guard. env OPENCODE_MEMORY_REDACT_GLOBAL > plugin option > false.
+let pluginRedactGlobalSecrets: boolean | undefined
+export function setRedactGlobalSecrets(raw: unknown): void {
+  pluginRedactGlobalSecrets = parseBoolish(raw)
+}
+export function redactGlobalSecrets(): boolean {
+  return parseBoolish(process.env.OPENCODE_MEMORY_REDACT_GLOBAL) ?? pluginRedactGlobalSecrets ?? false
+}
+
+// The actual decision for ANY memory write: in-repo writes scrub by default
+// (opt-out via localMemorySecrets); global writes scrub only when opted in.
+export function shouldRedactMemory(worktree: string): boolean {
+  if (isInRepoMemory(worktree)) return !localMemorySecretsAllowed()
+  return redactGlobalSecrets()
 }
 
 // ---------------------------------------------------------------------------

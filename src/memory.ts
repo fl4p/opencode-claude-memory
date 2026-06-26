@@ -5,7 +5,7 @@ import {
   getMemoryEntrypoint,
   ENTRYPOINT_NAME,
   validateMemoryFileName,
-  shouldRedactInRepoMemory,
+  shouldRedactMemory,
   MAX_MEMORY_FILES,
   MAX_MEMORY_FILE_BYTES,
   MAX_ENTRYPOINT_LINES,
@@ -174,11 +174,12 @@ export function saveMemory(
   const filePath = join(memDir, safeName)
 
   // In-repo memory may be committed/pushed — scrub credential VALUES before
-  // writing (the global ~/.claude store is left as-is). Covers every write path
-  // including post-session extraction. No-op for global mode or when the user
-  // opted into in-repo secrets. The scrub also flows into the MEMORY.md index
+  // writing. Covers every write path including post-session extraction. By
+  // default the global ~/.claude store is left as-is (secrets allowed there);
+  // shouldRedactMemory also returns true for global writes when the user opts in
+  // via OPENCODE_MEMORY_REDACT_GLOBAL. The scrub flows into the MEMORY.md index
   // pointer below, since it runs on name/description too.
-  if (shouldRedactInRepoMemory(worktree)) {
+  if (shouldRedactMemory(worktree)) {
     const scrubbed = scrubMemoryFields({ name, description, content })
     name = scrubbed.name
     description = scrubbed.description

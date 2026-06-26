@@ -6,7 +6,10 @@ import { saveMemory, readMemory } from "../src/memory.js"
 import {
   setLocalMemoryMode,
   setLocalMemorySecretsAllowed,
+  setRedactGlobalSecrets,
+  setSessionMemoryRoot,
   shouldRedactInRepoMemory,
+  shouldRedactMemory,
 } from "../src/paths.js"
 
 // A SYNTHETIC secret — never put a real credential in a repo file.
@@ -24,6 +27,7 @@ function makeTempGitRepo(): string {
 const savedCfg = process.env.CLAUDE_CONFIG_DIR
 const savedLocal = process.env.OPENCODE_MEMORY_LOCAL
 const savedSecrets = process.env.OPENCODE_MEMORY_LOCAL_SECRETS
+const savedRedactGlobal = process.env.OPENCODE_MEMORY_REDACT_GLOBAL
 
 beforeEach(() => {
   const cfg = mkdtempSync(join(tmpdir(), "redact-cfg-"))
@@ -31,8 +35,11 @@ beforeEach(() => {
   process.env.CLAUDE_CONFIG_DIR = cfg // isolate the global store from the dev's ~/.claude
   delete process.env.OPENCODE_MEMORY_LOCAL
   delete process.env.OPENCODE_MEMORY_LOCAL_SECRETS
+  delete process.env.OPENCODE_MEMORY_REDACT_GLOBAL
   setLocalMemoryMode(undefined)
   setLocalMemorySecretsAllowed(undefined)
+  setRedactGlobalSecrets(undefined)
+  setSessionMemoryRoot(undefined) // isolate from e2e tests that pin a session root
 })
 
 afterEach(() => {
@@ -40,8 +47,10 @@ afterEach(() => {
   restore("CLAUDE_CONFIG_DIR", savedCfg)
   restore("OPENCODE_MEMORY_LOCAL", savedLocal)
   restore("OPENCODE_MEMORY_LOCAL_SECRETS", savedSecrets)
+  restore("OPENCODE_MEMORY_REDACT_GLOBAL", savedRedactGlobal)
   setLocalMemoryMode(undefined)
   setLocalMemorySecretsAllowed(undefined)
+  setRedactGlobalSecrets(undefined)
   while (tempDirs.length > 0) {
     const d = tempDirs.pop()
     if (d) rmSync(d, { recursive: true, force: true })
@@ -76,6 +85,41 @@ describe("in-repo secret scrubbing", () => {
     saveMemory(repo, "creds", "Creds", "desc", "reference", CONTENT)
     const got = readMemory(repo, "creds")
     expect(got!.content).toContain(SECRET)
+  })
+
+  test("global save with OPENCODE_MEMORY_REDACT_GLOBAL opt-in DOES scrub", () => {
+    const repo = makeTempGitRepo()
+    setLocalMemoryMode("off") // global store
+    setRedactGlobalSecrets("on") // defense-in-depth opt-in
+    saveMemory(repo, "creds", "Creds", "desc", "reference", CONTENT)
+    const got = readMemory(repo, "creds")
+    expect(got!.content).toContain("«REDACTED»")
+    expect(got!.content).not.toContain(SECRET)
+  })
+})
+
+describe("shouldRedactMemory (global opt-in)", () => {
+  test("global write: redacts only when the opt-in is set", () => {
+    const repo = makeTempGitRepo()
+    setLocalMemoryMode("off")
+    expect(shouldRedactMemory(repo)).toBe(false) // default: secrets allowed globally
+    setRedactGlobalSecrets("on")
+    expect(shouldRedactMemory(repo)).toBe(true)
+  })
+
+  test("env OPENCODE_MEMORY_REDACT_GLOBAL overrides the plugin option", () => {
+    const repo = makeTempGitRepo()
+    setLocalMemoryMode("off")
+    setRedactGlobalSecrets("off")
+    process.env.OPENCODE_MEMORY_REDACT_GLOBAL = "1"
+    expect(shouldRedactMemory(repo)).toBe(true)
+  })
+
+  test("in-repo still scrubs by default regardless of the global knob", () => {
+    const repo = makeTempGitRepo()
+    setLocalMemoryMode("on")
+    setRedactGlobalSecrets("off")
+    expect(shouldRedactMemory(repo)).toBe(true)
   })
 })
 

@@ -21,7 +21,9 @@ import {
   setSessionMemoryRoot,
   setIndexMaxLines,
   setLocalMemorySecretsAllowed,
-  shouldRedactInRepoMemory,
+  setRedactGlobalSecrets,
+  shouldRedactMemory,
+  isInRepoMemory,
 } from "./paths.js"
 import { scrubMemoryFields } from "./redact.js"
 import { saveHarnessFeedback, HARNESS_FEEDBACK_CATEGORIES } from "./harness.js"
@@ -187,6 +189,10 @@ function recordPluginOptions(options: Record<string, unknown> | undefined): void
   // Allow secret values in IN-REPO memory (off by default). env
   // OPENCODE_MEMORY_LOCAL_SECRETS takes precedence.
   setLocalMemorySecretsAllowed(options?.localMemorySecrets)
+  // Opt-in defense-in-depth: also scrub credential values from GLOBAL writes
+  // (off by default; secrets are allowed in ~/.claude). env
+  // OPENCODE_MEMORY_REDACT_GLOBAL takes precedence.
+  setRedactGlobalSecrets(options?.redactGlobalSecrets)
 }
 
 // Additional memory roots whose index is surfaced read-only this session and
@@ -597,15 +603,17 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }, opti
           let saveDescription = args.description
           let saveContent = args.content
           let redactionNote = ""
-          if (shouldRedactInRepoMemory(r.root)) {
+          if (shouldRedactMemory(r.root)) {
             const s = scrubMemoryFields({ name: saveName, description: saveDescription, content: saveContent })
             saveName = s.name
             saveDescription = s.description
             saveContent = s.content
             if (s.count > 0) {
-              redactionNote =
-                ` 🔒 Redacted ${s.count} credential value(s) before writing to in-repo memory ` +
-                `(secrets are kept out of committable .claude/memory; set localMemorySecrets to allow them).`
+              redactionNote = isInRepoMemory(r.root)
+                ? ` 🔒 Redacted ${s.count} credential value(s) before writing to in-repo memory ` +
+                  `(secrets are kept out of committable .claude/memory; set localMemorySecrets to allow them).`
+                : ` 🔒 Redacted ${s.count} credential value(s) before writing ` +
+                  `(OPENCODE_MEMORY_REDACT_GLOBAL is enabled).`
             }
           }
           const filePath = saveMemory(

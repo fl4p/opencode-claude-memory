@@ -77,7 +77,9 @@ subdirectories and worktrees share one store.
 **Secrets:** in-repo writes scrub credential values (`«REDACTED»`) by default, since that
 store can be pushed; the private global store is untouched. It is a safety net, not a
 guarantee — review before pushing. Disable with `OPENCODE_MEMORY_LOCAL_SECRETS` /
-`localMemorySecrets`.
+`localMemorySecrets`. The global store keeps secrets by default; for belt-and-suspenders you
+can opt the same scrub onto global writes with `OPENCODE_MEMORY_REDACT_GLOBAL` /
+`redactGlobalSecrets`. The scrub is keyword-anchored and best-effort, not a guarantee.
 
 **Harness feedback stays global.** The post-session Phase 1 (harness feedback —
 observations about how the agent/tools behaved) is always written to the global
@@ -109,6 +111,7 @@ Each setting is an env var or an `opencode.json` option. Precedence: env var, th
 | `OPENCODE_MEMORY_AUTODREAM_MODEL` / `_AGENT` | extraction model / agent | Consolidation model / agent |
 | `OPENCODE_MEMORY_LOCAL` | `auto` | In-repo memory: `on` / `off` / `auto` |
 | `OPENCODE_MEMORY_LOCAL_SECRETS` | `off` | `on` allows secrets in in-repo memory |
+| `OPENCODE_MEMORY_REDACT_GLOBAL` | `off` | `on` also scrubs credential values from global writes (opt-in defense-in-depth) |
 | `OPENCODE_MEMORY_INDEX_MAX_LINES` | `160` | `MEMORY.md` soft limit; `0`/`off` disables |
 | `OPENCODE_MEMORY_EXTRA_ROOTS` | — | Extra memory roots (split on `, ; :` or newline) |
 
@@ -124,6 +127,7 @@ The model/local/index settings can also go in `opencode.json`:
         "recallModel":  "openai/gpt-4o-mini",
         "localMemory":  "auto",                   // on | off | auto
         "localMemorySecrets": false,
+        "redactGlobalSecrets": false,             // opt-in: scrub global writes too
         "indexMaxLines": 160,
         "extraMemoryRoots": ["/abs/path/to/other-repo"]
       }
