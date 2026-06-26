@@ -8,11 +8,9 @@ This OpenCode memory plugin lets OpenCode read and write Claude Code-compatible 
 
 Claude Code writes memory → OpenCode reads it. OpenCode writes memory → Claude Code reads it.
 
-[![npm version](https://img.shields.io/npm/v/opencode-claude-memory.svg?style=flat-square)](https://www.npmjs.com/package/opencode-claude-memory)
-[![npm downloads](https://img.shields.io/npm/dm/opencode-claude-memory.svg?style=flat-square)](https://www.npmjs.com/package/opencode-claude-memory)
-[![License](https://img.shields.io/npm/l/opencode-claude-memory.svg?style=flat-square)](https://github.com/kuitos/opencode-claude-memory/blob/main/LICENSE)
+**A fork of [kuitos/opencode-claude-memory](https://github.com/kuitos/opencode-claude-memory).** It keeps the upstream Claude-Code-compatible store and format, and adds a tuned extraction pipeline, optional in-repo memory, an index size-limit warning, and in-repo secret scrubbing — see [What this fork adds](#-what-this-fork-adds) and the [`docs/`](docs/) knowledge base.
 
-[Quick Start](#-quick-start) • [Why this exists](#-why-this-exists) • [What makes this different](#-what-makes-this-different) • [How it works](#-how-it-works) • [Who this is for](#-who-this-is-for) • [FAQ](#-faq)
+[Quick Start](#-quick-start) • [What this fork adds](#-what-this-fork-adds) • [How it works](#-how-it-works) • [Configuration](#-configuration) • [FAQ](#-faq)
 
 </div>
 
@@ -121,6 +119,18 @@ This one is a **compatibility layer**, not a new memory system:
 - same project/worktree resolution behavior
 
 The outcome: **shared context across Claude Code and OpenCode without maintaining two memory systems.**
+
+## 🍴 What this fork adds
+
+On top of upstream's compatibility layer, this fork adds:
+
+- **Tuned two-phase extraction** — post-session extraction runs Phase 1 (harness feedback) then Phase 2 (durable memory). Harness feedback (the `Obj1` sidecar: observations about how the agent/skills/tools behaved) is written *outside* the memory dir so it is never recalled into context. Default extraction model is GLM-4.6 (`opencode/big-pickle`); extraction/dream/recall models are all configurable (see [Configuration](#-configuration)).
+- **In-repo memory mode** — `OPENCODE_MEMORY_LOCAL` / `localMemory` (`auto`/`on`/`off`). Stores memory at `<repo>/.claude/memory/` instead of the global `~/.claude/...`, so it can be committed and shared with Claude Code (which writes the same path when asked). `auto` adopts the in-repo folder iff it already exists.
+- **In-repo secret scrubbing** — writes to in-repo `.claude/memory` are run through a deterministic credential scrub by default (the private global store is left as-is), since an in-repo store may be committed/pushed. Opt out with `OPENCODE_MEMORY_LOCAL_SECRETS` / `localMemorySecrets`.
+- **Index size-limit warning** — `OPENCODE_MEMORY_INDEX_MAX_LINES` / `indexMaxLines` (default 160). Once `MEMORY.md` reaches the limit the agent warns you once and offers to compact (cluster duplicates / drop stale / shorten entries).
+- **Cross-repo memory** — declare other repos via `extraMemoryRoots` to surface their memory read-only in a session.
+
+Background and rationale for all of the above (model bake-offs, local-inference experiments, the dream/consolidation design, secret-redaction evals) live in [`docs/`](docs/).
 
 ## ⚙️ How it works
 
@@ -385,12 +395,14 @@ Supported memory types:
 # Run tests
 bun test
 
-# Build published artifacts
+# Build artifacts
 bun run build
-
-# Release: push to main triggers semantic-release → npm publish
 ```
+
+See [`docs/`](docs/) for the design notes and experiment write-ups behind this fork.
 
 ## 📄 License
 
-[MIT](LICENSE) © [kuitos](https://github.com/kuitos)
+[MIT](LICENSE). Original work © [kuitos](https://github.com/kuitos) (upstream
+[opencode-claude-memory](https://github.com/kuitos/opencode-claude-memory)); fork
+modifications © their respective authors.
