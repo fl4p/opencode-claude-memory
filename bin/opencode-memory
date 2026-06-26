@@ -1911,8 +1911,15 @@ run_maintain() {
   # repeated maintain on the same session re-extracts and relies on the extractor
   # deduping against MEMORY.md (plus the incremental high-water mark when a
   # transcript mirror is present).
-  local session_id
-  session_id=$(get_session_target_id "[]" 0 "$WORKING_DIR" "$PROJECT_SCOPE_DIR" 1 || true)
+  # Resolve with a short retry: on_close fires right after SIGTERM, so the
+  # session may need a beat to appear in `session list`.
+  local session_id="" tries=0
+  while [ "$tries" -lt 5 ]; do
+    session_id=$(get_session_target_id "[]" 0 "$WORKING_DIR" "$PROJECT_SCOPE_DIR" 1 || true)
+    [ -n "$session_id" ] && break
+    tries=$((tries + 1))
+    sleep 1
+  done
   if [ -z "$session_id" ]; then
     log "maintain: no session found for $WORKING_DIR, nothing to do"
     return 0
@@ -1921,6 +1928,11 @@ run_maintain() {
     log "maintain: session $session_id has no conversation, skipping"
     return 0
   fi
+  # Let opencode flush its final turns to the DB before we fork the session
+  # (the caller may have just SIGTERM'd it). Tunable; 0 disables.
+  local settle="${OPENCODE_MEMORY_MAINTAIN_SETTLE:-2}"
+  case "$settle" in ''|*[!0-9]*) settle=2 ;; esac
+  [ "$settle" -gt 0 ] && sleep "$settle"
   log "maintain: processing latest session $session_id for $WORKING_DIR"
   run_post_session_tasks "$session_id" 0
 }
