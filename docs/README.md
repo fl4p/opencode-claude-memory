@@ -1,14 +1,13 @@
 # Auto-Memory / opencode-claude-memory — Knowledge Base
 
-Reference docs for the memory plugin and the research behind it, mined on
-transcripts) and cross-referenced with `auto-memory/replay-and-extraction-design.md`
-(the §-numbered design doc, the authoritative source).
+Reference docs for the memory plugin and the research behind it. These notes were
+mined from the project's own past Claude Code sessions and the plugin source.
 
 ## Documents
 
 | Doc | Covers |
 |-----|--------|
-| [architecture-and-decisions.md](architecture-and-decisions.md) | Plugin structure (paths/memory/recall/prompt/harness + the `bin/` wrapper), the Obj1/Obj2 split, two-phase extraction, why GLM is the default, design-doc §-map |
+| [architecture-and-decisions.md](architecture-and-decisions.md) | Plugin structure (paths/memory/recall/prompt/harness + the `bin/` wrapper), the Obj1/Obj2 split, two-phase extraction, why GLM is the default |
 | [models-and-extraction-quality.md](models-and-extraction-quality.md) | Every model tried for extraction/recall (GLM-4.6/big-pickle, Qwen, Gemma, kimi, Opus), the fixtures→groundedness→2-judge methodology, per-model failure modes |
 | [local-inference.md](local-inference.md) | Running models locally on a 36GB Mac — OOM solving, in-process vs HTTP server, MoE vs dense, mlx-lm vs mlx-vlm, footprint numbers, the dead-ends |
 | [dreaming-and-consolidation.md](dreaming-and-consolidation.md) | Auto-dream (cluster/merge/prune stale), gating thresholds, live-tool-loop vs plan prompt, fail-safe-but-not-lossless + the over-merge bug |
@@ -50,6 +49,5 @@ The mining agents caught several places where loose summaries had conflated thin
 
 ## Provenance
 
-Mined from the project's own past Claude Code sessions and reconciled against the
-`auto-memory/replay-and-extraction-design.md` design doc (the authoritative source).
+Mined from the project's own past Claude Code sessions and the plugin source.
 Specific session transcripts are intentionally not cited here.
