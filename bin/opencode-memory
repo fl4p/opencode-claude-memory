@@ -487,7 +487,9 @@ PROJECT_KEY="$(printf '%s' "$PROJECT_SCOPE_DIR" | cksum | awk '{print $1}')"
 # Lock files (prevent concurrent work on the same project)
 LOCK_DIR="$TMP_BASE_DIR/opencode-memory-locks"
 mkdir -p "$LOCK_DIR"
-EXTRACT_LOCK_FILE="$LOCK_DIR/${PROJECT_KEY}.extract.lock"
+# Shared per-project mutex held during ANY memory-store mutation (extraction OR
+# dream), so the two never interleave on the same memory files / MEMORY.md index.
+MEMORY_LOCK_FILE="$LOCK_DIR/${PROJECT_KEY}.memory.lock"
 
 STATE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/opencode-memory"
 mkdir -p "$STATE_DIR"
@@ -726,10 +728,13 @@ get_opencode_db_path() {
 }
 
 get_latest_session_for_dir_from_db() {
-  # Most-recently-updated REAL (non-fork) session whose directory is WORKING_DIR
+  # Most-recently-updated REAL interactive session whose directory is WORKING_DIR
   # or PROJECT_SCOPE_DIR, read straight from the opencode SQLite DB. Robust where
   # `opencode session list --format json` is flaky/empty (observed on some builds);
-  # this is the same DB-direct approach replay_memories.py uses.
+  # this is the same DB-direct approach replay_memories.py uses. Skips fork/child
+  # sessions AND sub-agent / fork sessions identified by title — most of those
+  # carry no parent_id but ARE titled "(@... subagent)" / "(fork #N)", so the
+  # title check is needed to pick the real session the user was driving.
   local workdir="$1"
   local project_dir="$2"
   local db_path
@@ -737,21 +742,24 @@ get_latest_session_for_dir_from_db() {
   [ -f "$db_path" ] || return 1
   command -v python3 >/dev/null 2>&1 || return 1
   python3 - "$db_path" "$workdir" "$project_dir" <<'PY'
-import os, sqlite3, sys
+import os, re, sqlite3, sys
 db, workdir, project_dir = sys.argv[1:4]
 scope = {os.path.realpath(p) for p in (workdir, project_dir) if p}
+SUBAGENT = re.compile(r"subagent|\(fork #", re.I)
 try:
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     rows = con.execute(
-        "SELECT id, directory, parent_id FROM session "
+        "SELECT id, directory, parent_id, title FROM session "
         "WHERE time_archived IS NULL ORDER BY time_updated DESC"
     ).fetchall()
     con.close()
 except Exception:
     raise SystemExit(1)
 for r in rows:
-    if r["parent_id"]:            # skip forked/child sessions (incl. our extraction forks)
+    if r["parent_id"]:                       # child/fork session
+        continue
+    if r["title"] and SUBAGENT.search(r["title"]):  # sub-agent / fork by title
         continue
     d = r["directory"] or ""
     if d and os.path.realpath(d) in scope:
@@ -1790,7 +1798,7 @@ run_extraction_if_needed() {
     fi
   fi
 
-  if ! acquire_simple_lock "$EXTRACT_LOCK_FILE" "memory extraction"; then
+  if ! acquire_simple_lock "$MEMORY_LOCK_FILE" "memory write"; then
     return 0
   fi
 
@@ -1841,7 +1849,7 @@ run_extraction_if_needed() {
   fi
 
   cleanup_forked_sessions "$fork_started_at_ms" "$parent_session_title"
-  release_simple_lock "$EXTRACT_LOCK_FILE"
+  release_simple_lock "$MEMORY_LOCK_FILE"
 }
 
 run_autodream_if_needed() {
@@ -1880,6 +1888,14 @@ run_autodream_if_needed() {
     return 0
   fi
 
+  # Mutual exclusion with extraction: never dream while a memory write runs on
+  # this store (and vice versa) — they'd race on the files + MEMORY.md index.
+  if ! acquire_simple_lock "$MEMORY_LOCK_FILE" "memory write"; then
+    log "Auto-dream: a memory write is in progress on this store, skipping"
+    rollback_consolidation_lock "$CONSOLIDATION_PRIOR_MTIME"
+    return 0
+  fi
+
   log "Auto-dream firing (${hours_since}h since last consolidation, ${touched_count} sessions touched)"
   log "Auto-dream log: $AUTODREAM_LOG_FILE"
 
@@ -1908,6 +1924,7 @@ run_autodream_if_needed() {
   fi
 
   cleanup_forked_sessions "$fork_started_at_ms" "$parent_session_title"
+  release_simple_lock "$MEMORY_LOCK_FILE"
 }
 
 run_post_session_tasks() {
@@ -2018,6 +2035,12 @@ run_dream_forced() {
     log "dream: another consolidation is already running, skipping"
     return 0
   fi
+  # Mutual exclusion with extraction (shared per-project memory lock).
+  if ! acquire_simple_lock "$MEMORY_LOCK_FILE" "memory write"; then
+    log "dream: a memory write is in progress on this store, skipping"
+    rollback_consolidation_lock "$CONSOLIDATION_PRIOR_MTIME"
+    return 0
+  fi
   log "dream: consolidating memory for $WORKING_DIR (host session $session_id)"
   log "dream log: $AUTODREAM_LOG_FILE"
   local parent_session_title
@@ -2035,6 +2058,7 @@ run_dream_forced() {
     log "dream: consolidation failed (exit code $code). Check $AUTODREAM_LOG_FILE"
   fi
   cleanup_forked_sessions "$fork_started_at_ms" "$parent_session_title"
+  release_simple_lock "$MEMORY_LOCK_FILE"
 }
 
 # ============================================================================
