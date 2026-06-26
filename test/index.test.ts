@@ -4,7 +4,7 @@ import { tmpdir } from "os"
 import { join } from "path"
 import { MemoryPlugin } from "../src/index.js"
 import { saveMemory } from "../src/memory.js"
-import { getMemoryDir } from "../src/paths.js"
+import { getMemoryDir, setSessionMemoryRoot } from "../src/paths.js"
 
 const tempDirs: string[] = []
 
@@ -22,6 +22,9 @@ function makeTempProject(): string {
 }
 
 afterEach(() => {
+  // MemoryPlugin pins process-global session-root state; reset it at the leak
+  // SOURCE so it can't poison local-mode resolution in other test files.
+  setSessionMemoryRoot(undefined)
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop()
     if (dir) rmSync(dir, { recursive: true, force: true })

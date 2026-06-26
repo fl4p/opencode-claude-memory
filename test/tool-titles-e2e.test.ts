@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
 import { MemoryPlugin } from "../src/index.js"
+import { setSessionMemoryRoot } from "../src/paths.js"
 
 const tempDirs: string[] = []
 
@@ -14,6 +15,8 @@ function makeTempGitRepo(): string {
 }
 
 afterEach(() => {
+  // MemoryPlugin pins process-global session-root state; reset at the source.
+  setSessionMemoryRoot(undefined)
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop()
     if (dir) rmSync(dir, { recursive: true, force: true })

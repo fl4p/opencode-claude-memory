@@ -51,6 +51,7 @@ afterEach(() => {
   setLocalMemoryMode(undefined)
   setLocalMemorySecretsAllowed(undefined)
   setRedactGlobalSecrets(undefined)
+  setSessionMemoryRoot(undefined)
   while (tempDirs.length > 0) {
     const d = tempDirs.pop()
     if (d) rmSync(d, { recursive: true, force: true })
@@ -113,6 +114,14 @@ describe("shouldRedactMemory (global opt-in)", () => {
     setRedactGlobalSecrets("off")
     process.env.OPENCODE_MEMORY_REDACT_GLOBAL = "1"
     expect(shouldRedactMemory(repo)).toBe(true)
+  })
+
+  test("env=0 suppresses an opted-in plugin option (reverse precedence)", () => {
+    const repo = makeTempGitRepo()
+    setLocalMemoryMode("off")
+    setRedactGlobalSecrets("on") // plugin opted in...
+    process.env.OPENCODE_MEMORY_REDACT_GLOBAL = "0" // ...but env explicitly disables
+    expect(shouldRedactMemory(repo)).toBe(false)
   })
 
   test("in-repo still scrubs by default regardless of the global knob", () => {
