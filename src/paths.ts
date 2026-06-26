@@ -196,6 +196,29 @@ export function getLocalMemoryDir(worktree: string): string {
   return join(root, LOCAL_MEMORY_DIRNAME)
 }
 
+// The session's own repo, captured by MemoryPlugin. The local on/off mode is a
+// statement about where THIS session stores memory — it must NOT force the
+// in-repo store onto OTHER repos surfaced via extraMemoryRoots. So extra roots
+// are resolved as if mode were "auto" (adopt in-repo only if it already exists),
+// which stops `localMemory:on` from littering a foreign repo with .claude/memory
+// just because we read its index. Cleared (undefined) outside a plugin session,
+// where every call is implicitly about the one worktree in hand.
+let sessionMemoryRoot: string | undefined
+export function setSessionMemoryRoot(worktree: string | undefined): void {
+  sessionMemoryRoot = worktree ? (findCanonicalGitRoot(worktree) ?? worktree) : undefined
+}
+
+function isSessionRoot(worktree: string): boolean {
+  if (!sessionMemoryRoot) return true
+  return (findCanonicalGitRoot(worktree) ?? worktree) === sessionMemoryRoot
+}
+
+// The on/off/auto mode that actually applies to a given worktree: the configured
+// mode for the session's own repo, "auto" for any other (extra) root.
+function effectiveLocalMode(worktree: string): LocalMemoryMode {
+  return isSessionRoot(worktree) ? getLocalMemoryMode() : "auto"
+}
+
 // ---------------------------------------------------------------------------
 // In-repo secret policy
 //
@@ -229,7 +252,7 @@ export function localMemorySecretsAllowed(): boolean {
 // global ~/.claude store). Compared without mutating state — it does not create
 // directories, unlike getMemoryDir.
 export function isInRepoMemory(worktree: string): boolean {
-  const mode = getLocalMemoryMode()
+  const mode = effectiveLocalMode(worktree)
   if (mode === "off") return false
   if (mode === "on") return true
   return isExistingDir(getLocalMemoryDir(worktree)) // auto: only if already adopted
@@ -292,7 +315,9 @@ function isExistingDir(path: string): boolean {
 }
 
 export function getMemoryDir(worktree: string): string {
-  const mode = getLocalMemoryMode()
+  // Mode applies to the session's own repo; extra roots resolve as "auto" so we
+  // never force-create an in-repo store inside a foreign repo (see effectiveLocalMode).
+  const mode = effectiveLocalMode(worktree)
   if (mode !== "off") {
     const localDir = getLocalMemoryDir(worktree)
     // "on" forces the in-repo folder (creating it). "auto" adopts it only when

@@ -50,6 +50,13 @@ extracted, so resuming a session re-mines only the new turns (and skips entirely
 nothing new was said) rather than re-processing the whole conversation. Set
 `OPENCODE_MEMORY_INCREMENTAL=0` to always re-mine the full session.
 
+The high-water mark is a count of user turns, so it assumes the transcript only grows. If a
+session is edited in place (same turn count, changed content) the unchanged count means that
+edit is skipped; if a transcript is compacted/shrinks, the stale mark is discarded and a
+full re-mine runs. The "turns 1..N already done" boundary the extractor is given is phrased
+in OpenCode user-turn terms; against a different transcript shape the index could drift,
+though the gate itself only needs the count to be monotonic.
+
 ## Where memory is stored
 
 Default (global, shared with Claude Code):
@@ -71,6 +78,17 @@ subdirectories and worktrees share one store.
 store can be pushed; the private global store is untouched. It is a safety net, not a
 guarantee — review before pushing. Disable with `OPENCODE_MEMORY_LOCAL_SECRETS` /
 `localMemorySecrets`.
+
+**Harness feedback stays global.** The post-session Phase 1 (harness feedback —
+observations about how the agent/tools behaved) is always written to the global
+`~/.claude/.../harness-feedback.md` sidecar, even in in-repo mode. It is developer
+feedback, not curated project memory, so it is deliberately kept out of a committable
+`.claude/memory`. Only the Phase 2 durable memories follow the in-repo switch.
+
+In-repo mode and `extraMemoryRoots` are independent: the `on`/`off`/`auto` switch governs
+only the session's own repo. Repos surfaced via `extraMemoryRoots` are always read with
+`auto` semantics, so `localMemory: on` never creates a `.claude/memory` inside another repo
+just because its index was surfaced.
 
 ## Configuration
 

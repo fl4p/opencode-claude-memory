@@ -9,6 +9,8 @@ import {
   getLocalMemoryMode,
   getProjectDir,
   setLocalMemoryMode,
+  setSessionMemoryRoot,
+  isInRepoMemory,
   setIndexMaxLines,
   getIndexMaxLines,
   DEFAULT_INDEX_MAX_LINES,
@@ -38,6 +40,7 @@ beforeEach(() => {
   delete process.env.OPENCODE_MEMORY_LOCAL
   delete process.env.OPENCODE_MEMORY_INDEX_MAX_LINES
   setLocalMemoryMode(undefined)
+  setSessionMemoryRoot(undefined)
   setIndexMaxLines(undefined)
 })
 
@@ -49,6 +52,7 @@ afterEach(() => {
   if (savedIndexEnv === undefined) delete process.env.OPENCODE_MEMORY_INDEX_MAX_LINES
   else process.env.OPENCODE_MEMORY_INDEX_MAX_LINES = savedIndexEnv
   setLocalMemoryMode(undefined)
+  setSessionMemoryRoot(undefined)
   setIndexMaxLines(undefined)
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop()
@@ -222,6 +226,42 @@ describe("getMemoryDir — worktrees share one repo's local store", () => {
     mkdirSync(sub, { recursive: true })
     // both resolve via the canonical git root → same local memory dir
     expect(getMemoryDir(sub)).toBe(getMemoryDir(repo))
+  })
+})
+
+describe("getMemoryDir — local mode applies only to the session's own repo", () => {
+  test("on mode does NOT force an in-repo store into an extra (foreign) repo", () => {
+    const sessionRepo = makeTempGitRepo()
+    const extraRepo = makeTempGitRepo()
+    setLocalMemoryMode("on")
+    setSessionMemoryRoot(sessionRepo)
+
+    // Session repo: on => in-repo, created.
+    expect(getMemoryDir(sessionRepo)).toBe(getLocalMemoryDir(sessionRepo))
+
+    // Extra repo with no pre-existing .claude/memory: stays GLOBAL and is NOT
+    // littered with an in-repo folder just because the session set on.
+    expect(getMemoryDir(extraRepo)).toBe(join(getProjectDir(extraRepo), "memory"))
+    expect(existsSync(getLocalMemoryDir(extraRepo))).toBe(false)
+    expect(isInRepoMemory(extraRepo)).toBe(false)
+  })
+
+  test("an extra repo that already has an in-repo store is still adopted (auto)", () => {
+    const sessionRepo = makeTempGitRepo()
+    const extraRepo = makeTempGitRepo()
+    mkdirSync(getLocalMemoryDir(extraRepo), { recursive: true })
+    setLocalMemoryMode("on")
+    setSessionMemoryRoot(sessionRepo)
+
+    expect(getMemoryDir(extraRepo)).toBe(getLocalMemoryDir(extraRepo))
+    expect(isInRepoMemory(extraRepo)).toBe(true)
+  })
+
+  test("with no session pinned, every worktree keeps its configured-mode behavior", () => {
+    const repo = makeTempGitRepo()
+    setLocalMemoryMode("on")
+    // setSessionMemoryRoot not called (undefined) => treat as the session repo.
+    expect(getMemoryDir(repo)).toBe(getLocalMemoryDir(repo))
   })
 })
 

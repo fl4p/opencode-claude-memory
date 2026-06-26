@@ -18,6 +18,7 @@ import {
   getMemoryDir,
   findCanonicalGitRoot,
   setLocalMemoryMode,
+  setSessionMemoryRoot,
   setIndexMaxLines,
   setLocalMemorySecretsAllowed,
   shouldRedactInRepoMemory,
@@ -360,6 +361,9 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }, opti
   directory ??= worktree
   recordPluginOptions(options)
   const memoryRoot = resolveMemoryRoot(worktree, directory)
+  // Pin the session's own repo so the local on/off mode applies only here, not to
+  // declared extraMemoryRoots (which stay "auto" — never force-created in-repo).
+  setSessionMemoryRoot(memoryRoot)
   getMemoryDir(memoryRoot)
 
   // Resolve a tool's optional `root` arg against the allowlist (this session's
