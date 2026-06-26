@@ -12,7 +12,7 @@ transcripts) and cross-referenced with `auto-memory/replay-and-extraction-design
 | [models-and-extraction-quality.md](models-and-extraction-quality.md) | Every model tried for extraction/recall (GLM-4.6/big-pickle, Qwen, Gemma, kimi, Opus), the fixtures→groundedness→2-judge methodology, per-model failure modes |
 | [local-inference.md](local-inference.md) | Running models locally on a 36GB Mac — OOM solving, in-process vs HTTP server, MoE vs dense, mlx-lm vs mlx-vlm, footprint numbers, the dead-ends |
 | [dreaming-and-consolidation.md](dreaming-and-consolidation.md) | Auto-dream (cluster/merge/prune stale), gating thresholds, live-tool-loop vs plan prompt, fail-safe-but-not-lossless + the over-merge bug |
-| [benchmarks-and-evals.md](benchmarks-and-evals.md) | The kimi-tools tool-use bake-off, SWE-bench runs, the memory-eval harness, the agent-benchmark fugu pipeline |
+| [memory-eval.md](memory-eval.md) | How memory extraction is evaluated — fixtures + at-scale replay, the two-phase `EXTRACT_PROMPT`, redaction findings |
 | [secrets-and-redaction.md](secrets-and-redaction.md) | The deterministic credential scrub, the 2-pass concentration eval, the global-vs-in-repo policy, what protects production |
 
 ## Current shipped state (2026-06-26)
@@ -36,16 +36,10 @@ Three features landed in `opencode-claude-memory` this day (branch
 
 The mining agents caught several places where loose summaries had conflated things:
 
-- **The kimi `40/48` figure is a *coding* (SWE-bench system-prompt) bake-off, NOT memory
-  extraction.** Opus 4.8 `xhigh×claude` = 40/48 resolved (~$52, caching) ties GLM-5.2's
-  best. Don't cite it as a memory-extraction result. (see benchmarks-and-evals.md)
 - **"OOM solved (in-process)" and "agentic tool loop" are two *separate* fixes.**
   In-process / no-HTTP-server solves the **OOM** (memory); the agentic tool loop fixes a
   **separate content bug** (single-shot Phase-2 truncation → 0 memories). Gemma even ships
   single-shot. (see local-inference.md)
-- **`/43→/48` was a subuid overflow on the rootless server** blocking 5 matplotlib images,
-  not a "colima artifact." colima `--vm-type vz --vz-rosetta` was the *separate* K2.6/K2.7
-  8-instance Mac path. (see benchmarks-and-evals.md)
 - **Harness feedback (Obj1) always writes to the GLOBAL project dir, even in local mode**
   (`harness.ts` uses `getProjectDir`, not `getMemoryDir`), so a committed `.claude/memory`
   will not carry the `harness-feedback.md` sidecar. (see architecture-and-decisions.md)

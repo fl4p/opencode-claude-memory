@@ -24,7 +24,7 @@ Source sessions cited inline as ``:
 | GLM-4-32B-0414 | extraction | local MLX (4-bit DWQ) | Dead end: slow + under-extracts | 3/7, ~100 s/fixture; wrong tool-format lesson |
 | Qwen3-Coder-30B-A3B (Novita fp8) | extraction | Novita cloud | Confirms Qwen failure is the MODEL, not quant/host | 2/7, 37% precision, 30 hard-fails, leaks `hunter2pickle` |
 | openai/gpt-5.5 | extraction (attempted) | — | Not evaluated (`ProviderModelNotFoundError`, no auth in eval config) | — |
-| Claude Opus 4.8 | (strong-caller control for coding bake-off) | cline gateway only | **Deferred** in the coding bake-off; not used for memory extraction | see §6 contradiction note |
+| Claude Opus 4.8 | not evaluated for extraction | cline gateway only | Reachable only via cline's gateway (opencode has no Anthropic); never run as an extraction model | — |
 
 Roles legend: **extraction** = read a finished session transcript → emit memories; **recall**
 = select/inject stored memories into a new session (the plugin's recall sub-agent); **dream** =
@@ -176,15 +176,10 @@ redaction guard in `local_extract.py`; the provider-free local dream harness `ru
 (measures the next local model in one command); the eval harnesses `gemma_*.py` /
 `saveworthiness_eval.py` (design doc §14f/§17/§18a).
 
-### ⚠ Contradiction / clarification vs the supplied ground truth
-The ground truth's *"kimi-tools bake-off: Opus 4.8 xhigh×claude = 40/48 (ties GLM-5.2's best)"* is
-different thing: a **SWE-bench coding system-prompt bake-off** on 8 `psf/requests` instances
-(scored **resolved/8**, not /48), where **Opus 4.8 was added as a strong-caller control and then
-explicitly DEFERRED** ("we will defer this"); Opus is reachable only via cline's gateway (opencode
-has no Anthropic). The 40/48 number belongs to a separate `kimi-tools` public bake-off (see memory
-`project_kimi_tools_opus_arm` / `project_kimi_tools_repo_moved`), which is about **coding** tool-use,
-**not memory extraction**. Flagging so the two bake-offs aren't conflated: no model-for-extraction
-verdict in this doc rests on the 40/48 figure.
+> Note: the `kimi-tools` "40/48" figure that circulates is a **coding** (SWE-bench
+> tool-use) bake-off owned by the `kimi-tools` repo — not memory extraction. No
+> extraction verdict in this doc rests on it; it is only mentioned here to avoid
+> conflating the two.
 
 ---
 
