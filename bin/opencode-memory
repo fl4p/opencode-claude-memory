@@ -725,7 +725,8 @@ try:
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     rows = con.execute(
-        "SELECT id, directory, parent_id FROM session ORDER BY time_updated DESC"
+        "SELECT id, directory, parent_id FROM session "
+        "WHERE time_archived IS NULL ORDER BY time_updated DESC"
     ).fetchall()
     con.close()
 except Exception:

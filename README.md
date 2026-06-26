@@ -121,29 +121,28 @@ Each setting is an env var or an `opencode.json` option. Precedence: env var, th
 | `OPENCODE_MEMORY_INDEX_MAX_LINES` | `160` | `MEMORY.md` soft limit; `0`/`off` disables |
 | `OPENCODE_MEMORY_EXTRA_ROOTS` | — | Extra memory roots (split on `, ; :` or newline) |
 
-The model/local/index settings can also go in `opencode.json`:
+The model/local/index settings can also go in `opencode.json`, as a `["package", {options}]`
+tuple entry:
 
 ```jsonc
 {
   "plugin": [
-    {
-      "package": "opencode-claude-memory",
-      "options": {
-        "extractModel": "opencode/big-pickle",   // dreamModel defaults to this
-        "recallModel":  "openai/gpt-4o-mini",
-        "localMemory":  "auto",                   // on | off | auto
-        "localMemorySecrets": false,
-        "redactGlobalSecrets": false,             // opt-in: scrub global writes too
-        "indexMaxLines": 160,
-        "extraMemoryRoots": ["/abs/path/to/other-repo"]
-      }
-    }
+    ["opencode-claude-memory", {
+      "extractModel": "opencode/big-pickle",   // dreamModel defaults to this
+      "recallModel":  "openai/gpt-4o-mini",
+      "localMemory":  "auto",                   // on | off | auto
+      "localMemorySecrets": false,
+      "redactGlobalSecrets": false,             // opt-in: scrub global writes too
+      "indexMaxLines": 160,
+      "extraMemoryRoots": ["/abs/path/to/other-repo"]
+    }]
   ]
 }
 ```
 
-Note: on opencode `1.17.x` the entry is a tuple instead:
-`"plugin": [["opencode-claude-memory", { ... }]]`. The wrapper accepts both.
+Use the tuple form — current opencode validates the plugin schema as `string | array` and
+**rejects** the `{ "package": ..., "options": ... }` object form ("Expected string | array").
+The wrapper reads options from either shape, but opencode itself must accept the entry first.
 
 Check resolved settings without launching a session:
 `OPENCODE_MEMORY_PRINT_SETTINGS=1 opencode run`.
