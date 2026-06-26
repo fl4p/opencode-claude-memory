@@ -581,7 +581,9 @@ exit 0
     const logPath = join(logDir, logFiles[0] ?? "")
     const logContent = readFileSync(logPath, "utf-8")
     expect(logContent).toContain("fork session:ses_delayed_target")
-  })
+    // Real `sleep`-based discovery: needs a generous timeout to stay green under
+    // full-suite parallel CPU load (passes in ~5s, default 5s timeout is too tight).
+  }, 20000)
 
   test("prefers storage session discovery when transcripts are absent", () => {
     const root = makeTempRoot()
@@ -1260,7 +1262,7 @@ exit 0
 
     expect(result.status).toBe(0)
     expect(existsSync(deleteLog)).toBe(false)
-  })
+  }, 20000)
 
   test("skips cleanup when the parent session title cannot be resolved", () => {
     const root = makeTempRoot()
@@ -1405,5 +1407,118 @@ exit 127
 
     expect(result.status).toBe(0)
     expect(existsSync(deleteLog)).toBe(false)
+  })
+
+  // --- Incremental extraction (per-session user-turn high-water mark) ---------
+
+  type IncrementalSetup = {
+    userTurns: number
+    mark?: number
+    incrementalEnv?: string
+  }
+
+  function runIncremental({ userTurns, mark, incrementalEnv }: IncrementalSetup) {
+    const root = makeTempRoot()
+    const fakeBin = join(root, "bin")
+    const homeDir = join(root, "home")
+    const tmpDir = join(root, "tmp")
+    const claudeDir = join(root, "claude")
+    const forkArgsFile = join(root, "fork-args")
+    const sessionId = "ses_inc"
+    const markFile = join(claudeDir, "opencode-memory", "extract-marks", sessionId)
+
+    mkdirSync(fakeBin, { recursive: true })
+    mkdirSync(homeDir, { recursive: true })
+    mkdirSync(tmpDir, { recursive: true })
+    mkdirSync(claudeDir, { recursive: true })
+
+    if (mark !== undefined) {
+      mkdirSync(join(claudeDir, "opencode-memory", "extract-marks"), { recursive: true })
+      writeFileSync(markFile, `${mark}\n`, "utf-8")
+    }
+
+    // Transcript the wrapped run writes: `userTurns` user lines + one assistant
+    // line so session_has_conversation (>1 line) passes.
+    const transcriptLines =
+      Array.from({ length: userTurns }, (_, i) => `{"type":"user","content":"u${i}"}`).join("\\n") +
+      "\\n" +
+      '{"type":"assistant","content":"a"}'
+
+    writeExecutable(
+      join(fakeBin, "opencode"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
+  echo '[{"id":"${sessionId}","directory":"${root}","updated":1,"created":1}]'
+  exit 0
+fi
+if [ "\${1:-}" = "export" ]; then
+  echo '{"info":{"directory":"${root}"}}'
+  exit 0
+fi
+if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "-s" ]; then
+  printf '%s\\n' "\$@" > "${forkArgsFile}"
+  echo "fork session:\${3:-}"
+  exit 0
+fi
+if [ "\${1:-}" = "run" ]; then
+  mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
+  printf '${transcriptLines}\\n' > "$CLAUDE_CONFIG_DIR/transcripts/${sessionId}.jsonl"
+  echo "main run ok"
+  exit 0
+fi
+exit 0
+`,
+    )
+
+    const env: Record<string, string> = {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      HOME: homeDir,
+      TMPDIR: tmpDir,
+      CLAUDE_CONFIG_DIR: claudeDir,
+      OPENCODE_MEMORY_SESSION_WAIT_SECONDS: "1",
+      OPENCODE_MEMORY_FOREGROUND: "1",
+      OPENCODE_MEMORY_AUTODREAM: "0",
+      OPENCODE_MEMORY_PROVENANCE: "0",
+    }
+    if (incrementalEnv !== undefined) env.OPENCODE_MEMORY_INCREMENTAL = incrementalEnv
+
+    const result = spawnSync("bash", [scriptPath, "run", "hello"], { cwd: root, encoding: "utf-8", env })
+    expect(result.status).toBe(0)
+
+    const forkRan = existsSync(forkArgsFile)
+    const forkArgs = forkRan ? readFileSync(forkArgsFile, "utf-8") : ""
+    const markValue = existsSync(markFile) ? readFileSync(markFile, "utf-8").trim() : undefined
+    return { forkRan, forkArgs, markValue, markFile }
+  }
+
+  test("incremental: first extraction has no boundary note and records the user-turn mark", () => {
+    const { forkRan, forkArgs, markValue } = runIncremental({ userTurns: 2 })
+    expect(forkRan).toBe(true)
+    expect(forkArgs).not.toContain("INCREMENTAL EXTRACTION")
+    expect(markValue).toBe("2")
+  })
+
+  test("incremental: a delta re-mines only new turns, injects the boundary note, and advances the mark", () => {
+    const { forkRan, forkArgs, markValue } = runIncremental({ userTurns: 3, mark: 1 })
+    expect(forkRan).toBe(true)
+    expect(forkArgs).toContain("INCREMENTAL EXTRACTION")
+    expect(forkArgs).toContain("turns 1-1")
+    expect(forkArgs).toContain("2 new user turn")
+    expect(markValue).toBe("3")
+  })
+
+  test("incremental: no new user turns since the mark skips extraction entirely", () => {
+    const { forkRan, markValue } = runIncremental({ userTurns: 2, mark: 2 })
+    expect(forkRan).toBe(false)
+    expect(markValue).toBe("2") // mark untouched
+  })
+
+  test("incremental: OPENCODE_MEMORY_INCREMENTAL=0 re-mines fully and never writes a mark", () => {
+    const { forkRan, forkArgs, markValue } = runIncremental({ userTurns: 2, mark: 5, incrementalEnv: "0" })
+    expect(forkRan).toBe(true)
+    expect(forkArgs).not.toContain("INCREMENTAL EXTRACTION")
+    expect(markValue).toBe("5") // pre-existing mark left as-is; disabled => not advanced
   })
 })

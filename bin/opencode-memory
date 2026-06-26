@@ -26,6 +26,7 @@
 #
 # Environment variables:
 #   OPENCODE_MEMORY_EXTRACT=0                 — Disable post-session extraction
+#   OPENCODE_MEMORY_INCREMENTAL=0             — Disable incremental extraction (re-mine the whole session each resume instead of only new turns)
 #   OPENCODE_MEMORY_FOREGROUND=1              — Run maintenance in foreground (debug)
 #   OPENCODE_MEMORY_TERMINAL_LOG=1|0          — Force-enable/disable terminal logs (default: foreground only)
 #   OPENCODE_MEMORY_OPENCODE_BIN=...          — Path to the opencode binary to use (e.g. a dev build); overrides PATH lookup
@@ -363,6 +364,10 @@ PY
 # ============================================================================
 
 EXTRACT_ENABLED="${OPENCODE_MEMORY_EXTRACT:-1}"
+# Incremental extraction: persist a per-session high-water mark (user-turn count at
+# last successful extraction) so resuming a session re-mines only the NEW turns
+# instead of re-forking the whole conversation. 0 reverts to full re-extraction.
+INCREMENTAL_ENABLED="${OPENCODE_MEMORY_INCREMENTAL:-1}"
 FOREGROUND="${OPENCODE_MEMORY_FOREGROUND:-0}"
 LOG_ENABLED="${OPENCODE_MEMORY_TERMINAL_LOG:-}"
 EXTRACT_MODEL="${OPENCODE_MEMORY_MODEL:-}"
@@ -408,9 +413,10 @@ fi
 
 # Verify resolved settings (env + opencode.json) without launching a session.
 if [ "${OPENCODE_MEMORY_PRINT_SETTINGS:-0}" = "1" ]; then
-  printf 'opencode.bin=%s\nextract.model=%s\nextract.agent=%s\ndream.model=%s\ndream.agent=%s\nrecall.model=%s\nlocal.mode=%s\nlocal.secrets=%s\nindex.max_lines=%s\n' \
+  printf 'opencode.bin=%s\nextract.model=%s\nextract.agent=%s\nextract.incremental=%s\ndream.model=%s\ndream.agent=%s\nrecall.model=%s\nlocal.mode=%s\nlocal.secrets=%s\nindex.max_lines=%s\n' \
     "$REAL_OPENCODE" \
     "${EXTRACT_MODEL:-<opencode default>}" "${EXTRACT_AGENT:-<opencode default>}" \
+    "${OPENCODE_MEMORY_INCREMENTAL:-1}" \
     "${AUTODREAM_MODEL:-<opencode default>}" "${AUTODREAM_AGENT:-<opencode default>}" \
     "${OPENCODE_MEMORY_RECALL_MODEL:-<opencode.json options.recallModel, else default>}" \
     "${OPENCODE_MEMORY_LOCAL:-<opencode.json options.localMemory, else auto>}" \
@@ -1574,6 +1580,76 @@ session_has_incremental_activity() {
   return 0
 }
 
+# ----------------------------------------------------------------------------
+# Incremental extraction high-water marks
+#
+# After a session is extracted we persist how many USER turns the transcript held
+# at that point. On a later resume we re-mine only the turns past that mark, and
+# skip entirely when nothing new was said. The mark is the user-turn count because
+# it is monotonic, cheap for the wrapper to compute, AND something the forked
+# extractor can itself count in the conversation it sees — so the boundary note we
+# inject ("turns 1..N already done") is one the model can actually apply.
+# ----------------------------------------------------------------------------
+
+EXTRACT_MARKS_DIR="$STATE_DIR/extract-marks"
+
+count_user_turns() {
+  # Echoes the number of `type:"user"` entries in a session transcript, or nothing
+  # if it cannot be determined (caller must treat "unknown" as fail-safe = full).
+  local transcript_file="$1"
+  [ -f "$transcript_file" ] || return 1
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$transcript_file" <<'PY'
+import json, sys
+path = sys.argv[1]
+n = 0
+try:
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            kind = obj.get("type")
+            if kind is None and isinstance(obj.get("message"), dict):
+                kind = obj["message"].get("role")
+            if kind == "user":
+                n += 1
+except OSError:
+    raise SystemExit(1)
+print(n)
+PY
+    return $?
+  fi
+
+  # No python3: count user lines with grep. grep -c exits 1 on zero matches, so
+  # tolerate that and normalize to 0.
+  local c
+  c=$(grep -cE '"(type|role)"[[:space:]]*:[[:space:]]*"user"' "$transcript_file" 2>/dev/null || true)
+  printf '%s\n' "${c:-0}"
+}
+
+read_extract_mark() {
+  local mark_file="$EXTRACT_MARKS_DIR/$1"
+  [ -f "$mark_file" ] || return 1
+  local value
+  value=$(head -1 "$mark_file" 2>/dev/null | tr -dc '0-9')
+  [ -n "$value" ] || return 1
+  printf '%s\n' "$value"
+}
+
+write_extract_mark() {
+  local session_id="$1" turns="$2"
+  [ "$INCREMENTAL_ENABLED" = "0" ] && return 0
+  [[ "$turns" =~ ^[0-9]+$ ]] || return 0
+  mkdir -p "$EXTRACT_MARKS_DIR" 2>/dev/null || return 0
+  printf '%s\n' "$turns" > "$EXTRACT_MARKS_DIR/$session_id" 2>/dev/null || true
+}
+
 run_extraction_if_needed() {
   local session_id="$1"
   local memory_written_during_session="$2"
@@ -1582,9 +1658,36 @@ run_extraction_if_needed() {
     return 0
   fi
 
+  # Current user-turn count drives the incremental marks below. Empty => unknown
+  # (no transcript / parse failure) => fall back to non-incremental behavior.
+  local current_turns=""
+  if [ "$INCREMENTAL_ENABLED" != "0" ]; then
+    current_turns=$(count_user_turns "$(get_transcripts_dir)/${session_id}.jsonl" 2>/dev/null || true)
+    [[ "$current_turns" =~ ^[0-9]+$ ]] || current_turns=""
+  fi
+
   if [ "$memory_written_during_session" = "1" ]; then
     log "Main agent already wrote memories during session, skipping extraction"
+    # The live agent curated these turns; advance the mark so a later resume does
+    # not re-mine them.
+    [ -n "$current_turns" ] && write_extract_mark "$session_id" "$current_turns"
     return 0
+  fi
+
+  # Incremental gate: if a prior pass already consumed every user turn this
+  # session currently has, there is nothing new to extract.
+  local prev_turns="" incremental_block=""
+  if [ -n "$current_turns" ]; then
+    prev_turns=$(read_extract_mark "$session_id" || true)
+    if [ -n "$prev_turns" ]; then
+      if [ "$current_turns" -le "$prev_turns" ]; then
+        log "Incremental: session $session_id has no new user turns since last extraction (mark $prev_turns), skipping"
+        return 0
+      fi
+      local delta=$((current_turns - prev_turns))
+      incremental_block="INCREMENTAL EXTRACTION: a prior extraction pass already processed user turns 1-${prev_turns} of this conversation and saved any memories they warranted. Treat those earlier turns as already-extracted CONTEXT — do NOT re-emit memories for them. Mine ONLY the ${delta} new user turn(s) after turn ${prev_turns} for NEW durable memories (you may still read the earlier turns for context). If the new turns warrant nothing, save nothing."
+      log "Incremental: re-mining $delta new user turn(s) since mark $prev_turns (now $current_turns)"
+    fi
   fi
 
   if ! acquire_simple_lock "$EXTRACT_LOCK_FILE" "memory extraction"; then
@@ -1612,18 +1715,26 @@ run_extraction_if_needed() {
   if [ "${OPENCODE_MEMORY_PROVENANCE:-1}" != "0" ]; then
     commits_block=$(get_session_commits_block "$session_id" "$WORKING_DIR" 2>/dev/null || true)
   fi
+  # Compose the final prompt from the optional incremental + commit prefixes and
+  # the base EXTRACT_PROMPT, joined by blank lines (only non-empty parts appear).
+  local full_prompt="$EXTRACT_PROMPT"
   if [ -n "$commits_block" ]; then
-    cmd+=("${commits_block}"$'\n\n'"$EXTRACT_PROMPT")
+    full_prompt="${commits_block}"$'\n\n'"$full_prompt"
     log "Injected commit provenance ($(printf '%s\n' "$commits_block" | grep -c '^- ') commits)"
-  else
-    cmd+=("$EXTRACT_PROMPT")
   fi
+  if [ -n "$incremental_block" ]; then
+    full_prompt="${incremental_block}"$'\n\n'"$full_prompt"
+  fi
+  cmd+=("$full_prompt")
 
   local fork_started_at_ms
   fork_started_at_ms=$(( $(date +%s) * 1000 ))
 
   if "${cmd[@]}" >> "$EXTRACT_LOG_FILE" 2>&1; then
     log "Memory extraction completed successfully"
+    # Advance the high-water mark only on success; a failed run leaves the mark so
+    # the same delta is retried next time.
+    [ -n "$current_turns" ] && write_extract_mark "$session_id" "$current_turns"
   else
     local code=$?
     log "Memory extraction failed (exit code $code). Check $EXTRACT_LOG_FILE for details"

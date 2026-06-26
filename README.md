@@ -45,6 +45,11 @@ default 24h since the last run and 5 touched sessions). Maintenance runs in the 
 unless `OPENCODE_MEMORY_FOREGROUND=1`. During a session the plugin injects the memory
 prompt and surfaces relevant memories via LLM recall.
 
+Extraction is incremental: it records how many user turns a session had when it was last
+extracted, so resuming a session re-mines only the new turns (and skips entirely when
+nothing new was said) rather than re-processing the whole conversation. Set
+`OPENCODE_MEMORY_INCREMENTAL=0` to always re-mine the full session.
+
 ## Where memory is stored
 
 Default (global, shared with Claude Code):
@@ -76,6 +81,7 @@ Each setting is an env var or an `opencode.json` option. Precedence: env var, th
 |---|---|---|
 | `OPENCODE_MEMORY_OPENCODE_BIN` | PATH lookup | Path to the `opencode` binary to wrap (e.g. a local dev build) |
 | `OPENCODE_MEMORY_EXTRACT` | `1` | `0` disables post-session extraction |
+| `OPENCODE_MEMORY_INCREMENTAL` | `1` | `0` re-mines the whole session on each resume instead of only new turns |
 | `OPENCODE_MEMORY_FOREGROUND` | `0` | `1` runs maintenance in foreground |
 | `OPENCODE_MEMORY_TERMINAL_LOG` | foreground-only | `1`/`0` forces terminal logs on/off |
 | `OPENCODE_MEMORY_MODEL` / `OPENCODE_MEMORY_AGENT` | opencode default | Extraction model / agent |
