@@ -694,7 +694,16 @@ get_latest_session_id() {
 }
 
 get_opencode_db_path() {
-  printf '%s\n' "$HOME/.local/share/opencode/opencode.db"
+  # Honour OPENCODE_DB (the binary's own resolution): a bare/relative name lives
+  # under the opencode data dir, an absolute path is used as-is. Without this the
+  # direct-SQLite helpers (titles, commit provenance, fork cleanup) would read the
+  # wrong DB when a launcher pins e.g. OPENCODE_DB=opencode-dev.db.
+  local data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/opencode"
+  local db="${OPENCODE_DB:-opencode.db}"
+  case "$db" in
+    /*) printf '%s\n' "$db" ;;
+    *)  printf '%s\n' "$data_dir/$db" ;;
+  esac
 }
 
 get_session_title_from_db() {
@@ -1895,7 +1904,13 @@ run_post_session_for_invocation() {
 run_maintain() {
   # Process the latest in-scope session for WORKING_DIR (no interactive run).
   # The on_close hook fires right after a session ends, so the newest in-scope
-  # session IS the one just closed. Extraction dedups against the existing index.
+  # session is normally the one just closed. Caveats: (1) if a SECOND session in
+  # the same dir/project is still live and more recently updated, that one is
+  # picked instead — acceptable for the single-tile-per-project common case;
+  # (2) memory_written is forced to 0 (a bare-binary tile was never tracked), so
+  # repeated maintain on the same session re-extracts and relies on the extractor
+  # deduping against MEMORY.md (plus the incremental high-water mark when a
+  # transcript mirror is present).
   local session_id
   session_id=$(get_session_target_id "[]" 0 "$WORKING_DIR" "$PROJECT_SCOPE_DIR" 1 || true)
   if [ -z "$session_id" ]; then
