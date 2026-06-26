@@ -74,6 +74,7 @@ Each setting is an env var or an `opencode.json` option. Precedence: env var, th
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `OPENCODE_MEMORY_OPENCODE_BIN` | PATH lookup | Path to the `opencode` binary to wrap (e.g. a local dev build) |
 | `OPENCODE_MEMORY_EXTRACT` | `1` | `0` disables post-session extraction |
 | `OPENCODE_MEMORY_FOREGROUND` | `0` | `1` runs maintenance in foreground |
 | `OPENCODE_MEMORY_TERMINAL_LOG` | foreground-only | `1`/`0` forces terminal logs on/off |

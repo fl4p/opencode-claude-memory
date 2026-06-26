@@ -28,6 +28,7 @@
 #   OPENCODE_MEMORY_EXTRACT=0                 — Disable post-session extraction
 #   OPENCODE_MEMORY_FOREGROUND=1              — Run maintenance in foreground (debug)
 #   OPENCODE_MEMORY_TERMINAL_LOG=1|0          — Force-enable/disable terminal logs (default: foreground only)
+#   OPENCODE_MEMORY_OPENCODE_BIN=...          — Path to the opencode binary to use (e.g. a dev build); overrides PATH lookup
 #   OPENCODE_MEMORY_MODEL=...                 — Extraction model override
 #   OPENCODE_MEMORY_AGENT=...                 — Extraction agent override
 #   OPENCODE_MEMORY_AUTODREAM=0               — Disable auto-dream consolidation
@@ -217,13 +218,25 @@ esac
 # ============================================================================
 
 find_real_opencode() {
+  # Explicit override wins: point at a specific binary (e.g. a local dev build)
+  # without having to reorder PATH. Used for both the wrapped run and the forked
+  # extraction/dream invocations.
+  if [ -n "${OPENCODE_MEMORY_OPENCODE_BIN:-}" ]; then
+    if [ ! -x "$OPENCODE_MEMORY_OPENCODE_BIN" ]; then
+      echo "[opencode-memory] ERROR: OPENCODE_MEMORY_OPENCODE_BIN is not an executable file: $OPENCODE_MEMORY_OPENCODE_BIN" >&2
+      exit 1
+    fi
+    echo "$OPENCODE_MEMORY_OPENCODE_BIN"
+    return 0
+  fi
+
   # Since this script is named `opencode-memory` (not `opencode`),
   # `command -v opencode` finds the real binary without ambiguity.
   local real
   real=$(command -v opencode 2>/dev/null) || true
   if [ -z "$real" ] || [ ! -x "$real" ]; then
     echo "[opencode-memory] ERROR: Cannot find opencode binary in PATH" >&2
-    echo "[opencode-memory] Make sure opencode is installed: https://opencode.ai" >&2
+    echo "[opencode-memory] Set OPENCODE_MEMORY_OPENCODE_BIN, or make sure opencode is installed: https://opencode.ai" >&2
     exit 1
   fi
   echo "$real"
@@ -395,7 +408,8 @@ fi
 
 # Verify resolved settings (env + opencode.json) without launching a session.
 if [ "${OPENCODE_MEMORY_PRINT_SETTINGS:-0}" = "1" ]; then
-  printf 'extract.model=%s\nextract.agent=%s\ndream.model=%s\ndream.agent=%s\nrecall.model=%s\nlocal.mode=%s\nlocal.secrets=%s\nindex.max_lines=%s\n' \
+  printf 'opencode.bin=%s\nextract.model=%s\nextract.agent=%s\ndream.model=%s\ndream.agent=%s\nrecall.model=%s\nlocal.mode=%s\nlocal.secrets=%s\nindex.max_lines=%s\n' \
+    "$REAL_OPENCODE" \
     "${EXTRACT_MODEL:-<opencode default>}" "${EXTRACT_AGENT:-<opencode default>}" \
     "${AUTODREAM_MODEL:-<opencode default>}" "${AUTODREAM_AGENT:-<opencode default>}" \
     "${OPENCODE_MEMORY_RECALL_MODEL:-<opencode.json options.recallModel, else default>}" \
