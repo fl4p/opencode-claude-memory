@@ -1,25 +1,25 @@
 # Secrets & Redaction
 
-> Mined 2026-06-26 from past Claude Code session transcripts, cross-referenced against
-> `auto-memory/replay-and-extraction-design.md` (§14e, §18a, §18b, §19, §19a).
+> Mined 2026-06-26 from the project's own past Claude Code sessions.
 > Theme: keeping secret VALUES out of saved memories in the auto-memory / opencode-claude-memory project.
 
 ## TL;DR — what actually protects what
 
-- **Production memory saves are PROMPT-ONLY.** The only secret defense in the shipping
-  plugin is a natural-language REDACTION RULE in the extract prompt
-  (`opencode-claude-memory/src/prompt.ts:122`). `grep src/` finds **no programmatic
-  gate**. (design doc §18b)
-- **The deterministic scrub WAS eval-only** — `redact_secrets` / `scrub_memory` lived
-  only in `auto-memory/local_extract.py` (Python eval/replay harness). (§14e, §18b)
-- **UPDATE (2026-06-26): the scrub is now ported into the plugin and runs in production
-  for IN-REPO writes.** `opencode-claude-memory/src/redact.ts` ports `redactSecrets`/
-  `scrubMemoryFields` 1:1 (incl. the §18a WiFi/PSK hardening + the 16-case regression
-  suite); `saveMemory` scrubs `name`/`description`/`content` whenever the active store is
-  the in-repo `.claude/memory` and the user has not opted into `localMemorySecrets`. The
-  global `~/.claude` store is deliberately left unscrubbed (private to the user). So the
-  prompt-only gap is now closed exactly where it matters most — the pushable store. The
-  prompt rule still applies everywhere as the keyword-less first line of defense.
+- **The prompt is the first line of defense everywhere.** A natural-language REDACTION RULE
+  in the extract prompt (`src/prompt.ts`) applies to every save and is the only thing that
+  catches keyword-less leaks. Historically it was the *only* defense — the deterministic
+  scrub lived solely in the Python eval/replay harness.
+- **A programmatic scrub now ships in the plugin.** `src/redact.ts` ports `redactSecrets`/
+  `scrubMemoryFields` 1:1 (incl. the WiFi/PSK hardening + the 16-case regression suite), and
+  `saveMemory` runs it on `name`/`description`/`content`. The decision (`shouldRedactMemory`):
+  - **IN-REPO writes: scrubbed by default** (the `.claude/memory` store can be committed/pushed),
+    opt-out via `localMemorySecrets`.
+  - **GLOBAL `~/.claude` writes: kept by default** (the store is private to the user), with an
+    **opt-in** scrub via `OPENCODE_MEMORY_REDACT_GLOBAL` / `redactGlobalSecrets` for
+    belt-and-suspenders.
+  So the prompt-only gap is closed exactly where it matters most — the pushable store — while
+  the default global policy ("secrets OK in `~/.claude`") is preserved. The scrub is
+  keyword-anchored and best-effort, not a guarantee; the prompt rule still backs it.
 
 ## Redaction architecture (the layered design)
 
@@ -31,14 +31,14 @@ The validated recipe for secret safety is **two complementary layers**, fail-saf
    VALUES anchored on strong keywords, leaving location pointers, paths, usernames, prose intact.
 2. **Concentrated LLM secret-strip pass** — a *separate* LLM call whose only job is "redact
    VALUES only, change nothing else." Reaches novel / contextual / keyword-less forms the regex
-   structurally cannot. (§19)
+   structurally cannot.
 
 Best deployed at **save-time to PREVENT the write**, with the periodic dream as a whole-store
-backstop sweep. Neither layer alone suffices; their **union** maximizes recall. (§19, §19a)
+backstop sweep. Neither layer alone suffices; their **union** maximizes recall.
 
-## The 2-pass concentration result (§19)
+## The 2-pass concentration result
 
-`auto-memory/eval/secret_pass_eval.py` — synthetic 8-memory store, 7 planted secret VALUES
+The 2-pass secret eval — synthetic 8-memory store, 7 planted secret VALUES
 (regex-catchable + regex-evading forms) + 5 decoy look-alikes. Conditions: `regex`, `1pass`
 (consolidate+strip together), `2pass` (concentrated strip), `2pass+rx`.
 
@@ -57,13 +57,13 @@ backstop sweep. Neither layer alone suffices; their **union** maximizes recall. 
 - **Concentration is decisive for the weak/local model.** Gemma asked to do both at once failed
   BOTH (43% strip + no consolidation); given one narrow job it jumps to 100%. This is what makes a
   local secret-strip pipeline viable at all.
-- The 2nd pass fixes secrets, **not over-merge** (orthogonal to the §18b dream-merge problem).
+- The 2nd pass fixes secrets, **not over-merge** (orthogonal to the dream-merge problem).
 - Conclusion: layered floor + concentrated LLM strip. **Does NOT change the default** (extraction +
   dream stay on GLM-4.6); it's the recipe IF a local pipeline is ever built.
 
-## Cross-validation on REAL stores (§19a) — 8 projects / 155 memories
+## Cross-validation on REAL stores — 8 projects / 155 memories
 
-`auto-memory/eval/secret_scan_real.py` measures PREVALENCE + the regex-vs-LLM GAP on real Claude
+The real-store secret scan measures PREVALENCE + the regex-vs-LLM GAP on real Claude
 stores (LLM arm is **local Gemma only** — never send real, possibly-secret memory to a cloud model;
 masked `/tmp` output only, exact leak locations kept OUT of any doc).
 
@@ -83,34 +83,34 @@ masked `/tmp` output only, exact leak locations kept OUT of any doc).
 - Best hygiene observed: most secrets in real stores are already `$VAR` refs (the user's
   secrets→`.env` rule); the literal leaks are exceptions, flagged for scrubbing.
 
-## The real PSK/WiFi leak and hardening (§18a → §18b)
+## The real PSK/WiFi leak and hardening
 
 - **A real secret VALUE leaked.** A Gemma extraction run on a **real session** saved the **Lab WiFi
   PSK value** into a memory (both consensus judges flagged it). `scrub_memory`'s keyword-anchored
   redaction did **not** catch the WiFi-PSK form. On a single controlled fixture Gemma leaked 0; on
   real sessions it leaked a real credential — same failure class as Qwen, milder only in volume.
-  This is why Gemma is judged NOT shippable. (§18a)
-- **WiFi/wireless hardening (§18b).** `local_extract.redact_secrets` gained the WiFi credential
+  This is why Gemma is judged NOT shippable.
+- **WiFi/wireless hardening.** `redact_secrets` gained the WiFi credential
   family: `psk`, `pre-shared key`, `wpa[2]-psk`, `wifi password/key`, `network key`, `passcode`.
-  The §18a leak slipped through because the old keyword set had **no** such term, so the
+  The leak slipped through because the old keyword set had **no** such term, so the
   already-present quoted-value gate never fired on ``PSK `<value>` ``. Pinned by
-  `auto-memory/eval/test_redact_secrets.py` (16 checks, synthetic values only; includes FP guards
+  the redaction regression suite (16 checks, synthetic values only; includes FP guards
   for SSID names, location pointers, "password-protected", "wifi is down").
 
 ## Known false-positive fixes
 
-  keyword collateral-matched "**WPA 4-way handshake**". Regex narrowed
+- **WPA handshake false match:** the `wpa` keyword collateral-matched "**WPA 4-way handshake**". Regex narrowed
   `wpa\d?(?:[\s_-]?psks?)?` → `wpa\d?[\s_-]?psks?`, making `psk`/`key` **required** after `wpa`.
-  Documented as a deliberate FP fix; **regression still 16/16** — the §18a leak case and all other
+  Documented as a deliberate FP fix; **regression still 16/16** — the leak case and all other
   cases still pass. The security review of that diff found **no findings** (eval-only safety net,
   intentional tightening, not a control regression).
-- **Description-form value** (§14e): `redact_secrets` first MISSED ``password 'hunter2pickle'``
+- **Description-form value:** `redact_secrets` first MISSED ``password '<planted-pw>'``
   (keyword-then-quoted-value, no copula). Hardened: copula now optional, a quoted value is itself a
   strong signal, and the length-only heuristic (which flagged ordinary long words like
   "requirements") was dropped. After: scrubbed from both fields, **0 false positives** across
   `password-protected` / `password requirements` / cred-location pointers / key paths / usernames.
 
-## The fundamental limit (§14e)
+## The fundamental limit
 
 > The patch-an-evasion cycle is itself the finding: regex post-redaction of an **uncooperative
 > model** is best-effort — a value phrased with no keyword cue still slips through. The guard
@@ -154,23 +154,22 @@ private but pushed/shared, so a leaked value escapes the machine. Therefore:
 
 ## Key files
 
-- `auto-memory/local_extract.py` — `redact_secrets` / `scrub_memory` (Python original)
+- The Python eval harness — `redact_secrets` / `scrub_memory` (original)
 - `opencode-claude-memory/src/redact.ts` — TS port now running in production for in-repo writes
 - `opencode-claude-memory/test/redact.test.ts` — the 16-case suite, ported
-- `auto-memory/eval/test_redact_secrets.py` — 16 checks, synthetic values + FP guards
-- `auto-memory/eval/secret_pass_eval.py` — 2-pass concentration eval (synthetic, both backends)
-- `auto-memory/eval/secret_scan_real.py` — real-store cross-validation (regex + local Gemma, masked /tmp)
+- The redaction regression suite — 16 checks, synthetic values + FP guards
+- The 2-pass concentration eval (synthetic, both backends)
+- The real-store cross-validation eval (regex + local Gemma, masked /tmp)
 - `opencode-claude-memory/src/prompt.ts:122` — the prompt-level REDACTION RULE (applies everywhere)
-- `auto-memory/replay-and-extraction-design.md` — §14e, §18a, §18b, §19, §19a
 
 ## Open questions
 
 - **Global store still relies on the prompt only.** In-repo writes are now scrubbed; the global
   `~/.claude` store is intentionally not. Is that the right call long-term, or should the dream
   sweep also run the scrub as a backstop?
-- **Local-pipeline higher-precision critic.** §19a's local Gemma critic is ~21% precision; a
+- **Local-pipeline higher-precision critic.** The local Gemma critic is ~21% precision; a
   human-facing "you have leaks" alert needs GLM (or a confirm pass) before it's not ~80% noise. Which?
-- **Residual keyword-less leaks.** The guard is best-effort by construction (§14e). What rate of
+- **Residual keyword-less leaks.** The guard is best-effort by construction. What rate of
   no-keyword-cue values still slips through on real corpora, and is the concentrated LLM strip pass
   worth wiring into production for those, or only the dream sweep?
 - **Cred-pointer opt-out default.** Pointers are allowed by default with an opt-out env var; should

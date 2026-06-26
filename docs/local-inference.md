@@ -5,15 +5,14 @@ Reference for running the auto-memory **extraction** and **dream/consolidation**
 numbers, in-process vs HTTP server, MoE vs dense, mlx-lm vs mlx-vlm, and the techniques
 that did **not** help.
 
-*Mined 2026-06-26* from session transcripts:
+*Mined 2026-06-26 from the project's own past Claude Code sessions.*
 
-Cross-references `auto-memory/replay-and-extraction-design.md` §12–§13 (the OOM/ceiling
-axis). **Important framing:** the four transcripts capture the *earlier* conclusion (a
+**Important framing:** the four transcripts capture the *earlier* conclusion (a
 ~30k-token ceiling, measured through the HTTP server, with a wrong "MoE-prefill
 accumulation" theory). The discovery that **the ceiling was the HTTP server, not the
-model** — and that in-process covers the whole corpus — is in **design-doc §13**, dated
-*after* these sessions. This doc reconciles both, and flags where the transcripts'
-conclusions were later overturned. See "Contradictions" at the end.
+model** — and that in-process covers the whole corpus — came *later*. This doc reconciles
+both, and flags where the transcripts' conclusions were later overturned. See
+"Contradictions" at the end.
 
 ---
 
@@ -27,11 +26,11 @@ concurrency**. That is what dissolves the OOM. (`local_extract.py --backend inpr
 - Leave the Metal **wired limit unset** (in-process default = 0). Do **not** raise it.
 - Qwen3-30B-A3B-4bit peak is **~0.094 GB / 1k tokens, dead-linear**; the 54k-token
   corpus-max session peaks **~23.5 GB**, ~4 GB under the ~27 GB Metal wired ceiling.
-  The whole transcript distribution fits single-shot. (design-doc §13a/§13c)
+  The whole transcript distribution fits single-shot.
 
 ---
 
-## 1. The model & why MoE (, )
+## 1. The model & why MoE
 
 - Hardware: **M3 Pro, 36 GB unified, 11 cores**, ~150 GB/s bandwidth. Default usable
   Metal ≈ **27 GB (~75% of 36 GB, not the full 36)** — this 27 GB *wired* ceiling, not
@@ -69,15 +68,15 @@ Two **separate** venvs; do not mix them.
 
 ## 3. In-process vs HTTP server — why in-process wins
 
-The single most load-bearing finding (design-doc §13; foreshadowed in 's
-"keep extraction off opencode / it's the concurrency"):
+The single most load-bearing finding (foreshadowed in the earlier "keep extraction off
+opencode / it's the concurrency" thread):
 
 - **The HTTP server is the OOM, not the model.** Measuring through a cold `mlx_lm.server`
   per rung showed ~30k tokens → OOM mid-prefill, and the thread blamed "MoE-prefill /
   allocator-cache accumulation." Re-measuring **in-process** (model loaded once,
   `generate_step` called directly) **refutes both the theory and the ceiling**: peak is
   linear/shallow and the 54k-max session sails through at 23.5 GB.
-- **Why the server crashed at ~30k but in-process reaches 54k** (§13b):
+- **Why the server crashed at ~30k but in-process reaches 54k:**
   - `mlx_lm.server` **sets the Metal wired limit to 29 GB at startup** (`server.py:1889`),
     which makes it *retain* allocator buffers instead of releasing them → peak inflates.
     In-process leaves wired **unset (0)** → buffers released freely.
@@ -90,24 +89,24 @@ The single most load-bearing finding (design-doc §13; foreshadowed in 's
   concurrency=1, off opencode**" — `replay_transcript.py` was found to drive `opencode run`
   (the concurrent OOM path), so "off opencode" meant **building a new direct harness**
   (`direct_extract_probe.py`), not reusing the replay script. The full in-process
-  refutation came later (§13).
+  refutation came later.
 
 ## 4. Memory-footprint numbers
 
 | what | number | source |
 |---|---|---|
 | Qwen 4-bit weights on disk | ~17 GB | — |
-| Metal **wired** ceiling (the wall) | ~27 GB (≈75% of 36) |  / design §12b |
-| Qwen in-process prefill peak | **~0.094 GB / 1k tok, linear** | design §13a |
-| Qwen single-shot **54,376-tok** session (corpus max) | **peak 23.46 GB, survives** | design §13c |
-| Qwen KV at 30k tok | only ~3 GB (GQA: 48L × 4 KV-heads × 128 dim ≈ 96 KB/tok) — *not* the binding term | design §12c/§13a |
-| Gemma-4-12B `gemma4_unified` (mlx-vlm) peak | **~9.5 GB** (read via `mx.get_peak_memory`) | ground-truth / MEMORY.md; transcript shows the measurement code, not the prose number |
-| (superseded) server-measured single-req ceiling | ~18k survives / ~33k OOM → "≈30k" |  / design §12c |
+| Metal **wired** ceiling (the wall) | ~27 GB (≈75% of 36) | project notes |
+| Qwen in-process prefill peak | **~0.094 GB / 1k tok, linear** | project notes |
+| Qwen single-shot **54,376-tok** session (corpus max) | **peak 23.46 GB, survives** | project notes |
+| Qwen KV at 30k tok | only ~3 GB (GQA: 48L × 4 KV-heads × 128 dim ≈ 96 KB/tok) — *not* the binding term | project notes |
+| Gemma-4-12B `gemma4_unified` (mlx-vlm) peak | **~9.5 GB** (read via `mx.get_peak_memory`) | project ground-truth notes; transcript shows the measurement code, not the prose number |
+| (superseded) server-measured single-req ceiling | ~18k survives / ~33k OOM → "≈30k" | project notes |
 
 Coverage: at the **mistaken** 30k server ceiling, ~76% of sessions fit single-shot and
 ~24% looked like they needed map-reduce (median session 8.7k tok, p75 24k, max 54k —
 computed with the **real Qwen3 tokenizer**, after fixing a char-vs-token unit bug; see
-§5). In-process retires that framing: the whole distribution (max 54k) fits single-shot
+section 5). In-process retires that framing: the whole distribution (max 54k) fits single-shot
 with margin, so **0% need chunking** today.
 
 ## 5. Bugs found & fixed along the way
@@ -122,25 +121,24 @@ with margin, so **0% need chunking** today.
   `harness_feedback` and stop *before* Phase-2 `memory_save`, depending on whether the
   model batched both into turn 1 — starving memory extraction to **0 entries**. Root cause
   is a **`local_extract.py` correctness bug, not a model trait**; a one-line prompt edit
-  flips it, and the **agentic tool-loop** fix makes Phase-2 reliable. (design §13c
-  footnote; ground-truth MEMORY.md.) NB this is a *content/correctness* fix, distinct from
-  the *OOM* fix in §3 — see Contradictions.
+  flips it, and the **agentic tool-loop** fix makes Phase-2 reliable. NB this is a
+  *content/correctness* fix, distinct from the *OOM* fix in section 3 — see Contradictions.
 - **Memory tail-truncation recall loss.** The 32k cap kept the transcript *tail*
   (`body[-MAX_TRANSCRIPT_CHARS:]`), silently dropping early memory-worthy facts — a recall
   problem, not a memory-budget one.
 - **Fabricated commit hash.** A single-shot 54k extraction cited commit `a1b2c3d`
   (0 occurrences in repo); a prompt edit removed it without changing peak (23.44 vs 23.46
-  GB). (design §13c)
+  GB).
 
 ## 6. Techniques that did NOT help (and why)
 
 - **KV quantization (KIVI / VeloxQuant 2-bit, Q8).** Irrelevant here: KV is only ~3 GB at
   30k and the OOM is *not* KV-bound. You can't quant your way out of a non-KV OOM. (And
   once in-process is used, there is no ceiling to raise in range anyway.) The whole
-  KIVI/KV-quant detour was retired *by data*. (, design §12c/§13a/§13d)
+  KIVI/KV-quant detour was retired *by data*.
 - **Raising `iogpu.wired_limit_mb`.** The intuitive lever is the **opposite** of what
   helps. The server crashes *because* it pins wired to 29 GB and retains buffers;
-  in-process leaves wired unset (0) and releases freely. Leave it unset. (design §13d)
+  in-process leaves wired unset (0) and releases freely. Leave it unset.
 - **"SoloHeaven" (`joongom/mlx-soloheaven`).** Its marquee prefix-cache/250× feature is
   **useless for extraction** — every transcript is a distinct single-shot prompt with no
   shared prefix to reuse (same reason ordinary prefix caching doesn't help extraction).
@@ -148,9 +146,8 @@ with margin, so **0% need chunking** today.
   mid-matmul**, and in-process measured **~600 s RPC-timeout slow** with no OOM benefit
   over the in-process default. Rejected for extraction (potentially useful for the
   *interactive coding* loop, which *is* a shared-growing-prefix workload).
-  (, design §13d)
 - **`prefill_step_size` tuning.** A near no-op for the ceiling (step 8192 vs 2048 ≈
-  263 s vs 292 s, ~10% faster, +0.7 GB peak). (design §13d)
+  263 s vs 292 s, ~10% faster, +0.7 GB peak).
 - **Prefix / prompt caching for extraction.** No shared prefix across single-shot
   transcripts → nothing to cache. (It *is* the real win for interactive agentic coding.)
 - **Aggressive KV quant for extraction quality.** Cautioned against on recall grounds
@@ -174,7 +171,7 @@ with margin, so **0% need chunking** today.
 ## Contradictions / refinements vs the briefed ground truth
 
 1. **"OOM solved by in-process *agentic tool loop* (NOT single-shot)" conflates two fixes.**
-   Per design §13, **in-process** (deleting the HTTP server) is what solves **OOM** — and
+   **In-process** (deleting the HTTP server) is what solves **OOM** — and
    in-process **single-shot** itself is fine memory-wise (peak 23.5 GB at the 54k max). The
    **agentic tool loop** fixes a *separate* problem: the single-shot **Phase-2 truncation**
    (a `local_extract.py` correctness bug → 0 memories), i.e. *content/reliability*, not
@@ -183,24 +180,23 @@ with margin, so **0% need chunking** today.
 2. **The four source transcripts do NOT contain the in-process refutation.** They stop at
    the **server-measured ~30k ceiling** and the (later-disproven) "MoE-prefill /
    allocator-cache accumulation" theory, plus the KIVI/SoloHeaven/wired-limit debate. The
-   `0.094 GB/1k`, `23.5 GB @ 54k`, and "ceiling was the HTTP server" facts come from
-   **design-doc §13**, which post-dates these sessions. Ground truth is confirmed by the
-   design doc, *not* by the transcripts — the transcripts are the dead-end-laden journey
-   to it.
+   `0.094 GB/1k`, `23.5 GB @ 54k`, and "ceiling was the HTTP server" facts were established
+   *later*, post-dating these sessions — the transcripts are the dead-end-laden journey to
+   that conclusion, not the conclusion itself.
 3. **Ground-truth "~30k ceiling was the HTTP server" — confirmed**, with the precise
    mechanism the brief omits: the server pins `wired_limit=29 GB` at startup and **retains**
    buffers, and opencode concurrency + per-request HTTP/detokenizer state roughly doubles
-   peak. (design §13b)
-4. **Gemma peak ~9.5 GB** is asserted in ground truth/MEMORY.md; the 06-19 transcript only
-   shows the *measurement code* (`mx.get_peak_memory`), not the prose figure — treat 9.5
-   GB as design/MEMORY-sourced, not transcript-quoted.
+   peak.
+4. **Gemma peak ~9.5 GB** is asserted in the project's ground-truth notes; the 06-19
+   transcript only shows the *measurement code* (`mx.get_peak_memory`), not the prose figure
+   — treat 9.5 GB as notes-sourced, not transcript-quoted.
 5. **"Whole distribution fits at ~23.5 GB" — confirmed**, but note 23.5 GB is the *single
    54k-max session*; smaller sessions are far lower (linear at 0.094 GB/1k). The corpus
    *max* is what fits at 23.5 GB.
 
 ## Open questions
 
-- **Qwen Phase-2 stability under greedy decoding** is still brittle (design §13c caveat):
+- **Qwen Phase-2 stability under greedy decoding** is still brittle:
   few-shot / the Phase-1 abstain delta were proposed but not confirmed landed. Has the
   agentic-tool-loop fix fully stabilised Phase-2 across the corpus, or is it still
   session-dependent?
@@ -208,10 +204,10 @@ with margin, so **0% need chunking** today.
   TODOs; in-process made them moot for extraction — were they ever run,
   and is there any residual case (e.g. >54k synthetic sessions) where the server path or a
   2-way split is still needed?
-- **Gemma-4 as a *shippable* local extractor**: MEMORY records it as "best local extractor
-  tried but NOT shippable" (over-capture, a real secret-VALUE leak). Is mlx-lm #1096 (the
+- **Gemma-4 as a *shippable* local extractor**: the project notes record it as "best local
+  extractor tried but NOT shippable" (over-capture, a real secret-VALUE leak). Is mlx-lm #1096 (the
   unparsed `<|"|>` tool-call token) fixed upstream yet, and would native tool-calls change
   the verdict?
-- **Map-reduce harness** for hypothetical >ceiling sessions: design §13 says none exist in
-  the true corpus (max 54k) — is the token-aware 2-way split still maintained as dormant
-  insurance, or removed?
+- **Map-reduce harness** for hypothetical >ceiling sessions: none exist in the true corpus
+  (max 54k) — is the token-aware 2-way split still maintained as dormant insurance, or
+  removed?

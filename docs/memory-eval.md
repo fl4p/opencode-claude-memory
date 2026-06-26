@@ -1,11 +1,10 @@
 # Memory-Extraction Evaluation
 
 How the auto-memory extraction prompt is validated: does it save the right durable facts,
-suppress noise, and never leak secrets? Reconciled with the design doc
-`auto-memory/replay-and-extraction-design.md`.
+suppress noise, and never leak secrets?
 
 (Tool-use / SWE-bench coding benchmarks for the underlying models are out of scope here —
-those belong to the `kimi-tools` and `agent-benchmark` repos. This doc only covers the
+those belong to separate coding-benchmark projects. This doc only covers the
 evaluation of *memory extraction*.)
 
 ## Replay model
@@ -24,8 +23,7 @@ extraction-quality verdicts (GLM vs Qwen vs Gemma vs kimi) are in
     real harness-feedback findings.
   - a **27-session batch** — 0 user memories with opt-in off, commit-hash provenance on
     project memories, credential-pointer references allowed but 0 secret values.
-- The design doc's §16b "real-session 2-judge consensus" (and the later Gemma/Qwen
-  verdicts) extends this.
+- The later "real-session 2-judge consensus" (and the Gemma/Qwen verdicts) extends this.
 
 ## Prompt design
 

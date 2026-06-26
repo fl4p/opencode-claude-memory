@@ -1,7 +1,6 @@
 # Dreaming & Memory Consolidation
 
-*Reference doc, mined from Claude Code session transcripts on 2026-06-26.*
-*Cross-reference: `auto-memory/replay-and-extraction-design.md` (§10c, §17, §18, §18a, §18b cover the dream and the over-merge in depth — this doc summarizes and points back).*
+*Reference doc, mined from the project's own past Claude Code sessions. It summarizes the dream and the over-merge finding.*
 
 The "dream" is the auto-memory project's periodic **consolidation pass**: a separate
 operation from per-session extraction that clusters, merges, and prunes the accumulated
@@ -43,7 +42,7 @@ Disciplines carried over from extraction (verbatim in the prompt):
 The prompt design is `orient → consolidate → prune`: (1) `memory_list` the whole
 inventory; for any overlapping cluster `memory_read` each member before merging
 ("descriptions alone are not enough to merge on"); (2) classify each memory
-stale/duplicate/good and apply. This was aligned to Claude Code's "§F" pruning-prompt
+stale/duplicate/good and apply. This was aligned to Claude Code's pruning-prompt
 design during the 2026-06-16 dev session.
 
 ---
@@ -86,7 +85,7 @@ adapts the shipping tool-loop prompt for plan mode **without touching the shippi
 
 This fix resolved a **self-contradiction confound**: before it, `gemma_dream.py` fed the
 tool-loop body AND a `PLAN_INSTRUCTION` appendix ("Do NOT call any tools. Output ONLY a
-single JSON object") that argued with each other (§18b).
+single JSON object") that argued with each other.
 
 ---
 
@@ -119,7 +118,7 @@ prompt is only covered behaviorally by the `run_dream.py` validation run.
 ## 4. Fail-safe but NOT lossless — the over-merge bug (the key finding)
 
 **Confirms ground truth.** The honest standing: the dream is **fail-safe but NOT lossless**
-(design doc §18b). Tracking how this was established:
+Tracking how this was established:
 
 - **GLM-4.6 baseline (production model, `opencode/big-pickle`):** the reference quality
   bar. On the pooled fugu corpus: **9 → 6, near-lossless**, conservative, type-respecting,
@@ -127,11 +126,11 @@ prompt is only covered behaviorally by the `run_dream.py` validation run.
   still present in a surviving memory — e.g. the havan log path survives in
   `pv_solar_mppt_setup`). GLM **keeps `bat_c` fully intact** (`project_bat_c_optional_for_psu_topology`).
 
-- **§18 (Gemma, original measurement):** looked like a clean win — 9→6, full coverage,
+- **Gemma, original measurement:** looked like a clean win — 9→6, full coverage,
   "preserves the bat_c detail / lossless." **SUPERSEDED.** That run used the
   self-contradictory prompt (tool-loop body + JSON-plan appendix), a confound.
 
-- **§18b (prompt conflict fixed via `build_plan_prompt`):** with a coherent,
+- **Prompt conflict fixed (via `build_plan_prompt`):** with a coherent,
   discipline-faithful plan prompt, Gemma's 9→6 is **mechanically clean (full coverage,
   no phantom deletes) but NOT lossless.** Both parsing runs fold the **distinct**
   `bat_c_optional_for_psu_topology` fact INTO `shared_bus_termination_fix`, compressing its
@@ -149,12 +148,12 @@ prompt is only covered behaviorally by the `run_dream.py` validation run.
   `[feedback_secrets_env_memory_repo, project_shared_bus_termination_architecture,
   project_shared_bus_termination_fix]`, created nothing, and **kept `bat_c` fully intact.**
   So GLM preserves the distinct fact where Gemma folds it → **the over-merge is a Gemma
-  judgment flaw, NOT prompt under-specification.** (The §18b prompt fix was still correct —
+  judgment flaw, NOT prompt under-specification.** (The prompt fix was still correct —
   it removed a genuine self-contradiction — but was never going to fix the over-merge.)
 
 - **Fail-safe is the saving grace.** temp=0.6×3 → `after_count = [6, 9, 9]`: the two 9→9
   are JSON **parse failures → safe no-op** (deleted nothing), never a *different*
-  destructive set. Categorically unlike Qwen3-30B-A3B (§17), which produced 3 genuinely
+  destructive set. Categorically unlike Qwen3-30B-A3B, which produced 3 genuinely
   different destructive delete-sets, once self-deleted a merge it had just written, and
   wiped distinct non-duplicate facts with no replacement — irreversible damage. Parse
   robustness is weak at temp>0 (only 1/3 produced a usable plan; the long inline inventory
@@ -169,8 +168,8 @@ prompt is only covered behaviorally by the `run_dream.py` validation run.
   GLM prunes a borderline-meta preference — but GLM's is milder and recoverable.
 
 **Production decision: dreaming stays on GLM-4.6.** Qwen3-30B-A3B is UNSAFE for
-consolidation (irreversibly destructive, §17). Gemma is fail-safe but below the GLM bar and
-NOT shippable as the local default (§18a/§18b). Consolidation, even more than extraction,
+consolidation (irreversibly destructive). Gemma is fail-safe but below the GLM bar and
+NOT shippable as the local default. Consolidation, even more than extraction,
 requires conservative, stable judgment because deletion is irreversible.
 
 ---
