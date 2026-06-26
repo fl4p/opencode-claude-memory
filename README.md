@@ -45,6 +45,12 @@ default 24h since the last run and 5 touched sessions). Maintenance runs in the 
 unless `OPENCODE_MEMORY_FOREGROUND=1`. During a session the plugin injects the memory
 prompt and surfaces relevant memories via LLM recall.
 
+When opencode is launched directly (not through the hook) — e.g. a dashboard tile or an
+editor integration — the post-session step never runs. For those cases,
+`opencode-memory maintain [--dir DIR]` runs extraction + the auto-dream gate on the latest
+session for `DIR` without starting an interactive opencode, so it can be wired to a cron job
+or an on-close hook. It honours the same `OPENCODE_MEMORY_*` model/bin settings.
+
 Extraction is incremental: it records how many user turns a session had when it was last
 extracted, so resuming a session re-mines only the new turns (and skips entirely when
 nothing new was said) rather than re-processing the whole conversation. Set

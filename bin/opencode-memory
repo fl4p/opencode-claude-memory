@@ -24,6 +24,14 @@
 #   - `jq` for auto-dream gate/session counting
 #   - The opencode-memory plugin installed (provides memory_* tools)
 #
+# Subcommands:
+#   install / uninstall            — manage the shell hook
+#   maintain [--dir DIR]           — run extraction (+ auto-dream gate) on the
+#                                    latest session for DIR without launching an
+#                                    interactive opencode (for cron / dashboard
+#                                    on_close). Foreground; honours the same
+#                                    OPENCODE_MEMORY_* model/bin env vars.
+#
 # Environment variables:
 #   OPENCODE_MEMORY_EXTRACT=0                 — Disable post-session extraction
 #   OPENCODE_MEMORY_INCREMENTAL=0             — Disable incremental extraction (re-mine the whole session each resume instead of only new turns)
@@ -203,6 +211,22 @@ case "${1:-}" in
   uninstall)
     uninstall_hook
     exit 0
+    ;;
+  maintain)
+    # On-demand maintenance: run extraction (+ the auto-dream gate) on the latest
+    # session for a directory WITHOUT launching an interactive opencode. For cron
+    # and the session-dashboard on_close hook. Optional: --dir DIR (default: pwd).
+    MAINTAIN_MODE=1
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --dir) OPENCODE_MEMORY_DIR="${2:-}"; shift 2 || shift ;;
+        --dir=*) OPENCODE_MEMORY_DIR="${1#--dir=}"; shift ;;
+        *) shift ;;
+      esac
+    done
+    [ -n "${OPENCODE_MEMORY_DIR:-}" ] && export OPENCODE_MEMORY_DIR
+    set --  # maintain does not forward args to opencode
     ;;
   self)
     case "${2:-}" in
@@ -1868,9 +1892,35 @@ run_post_session_for_invocation() {
   run_post_session_tasks "$session_id" "$memory_written_during_session"
 }
 
+run_maintain() {
+  # Process the latest in-scope session for WORKING_DIR (no interactive run).
+  # The on_close hook fires right after a session ends, so the newest in-scope
+  # session IS the one just closed. Extraction dedups against the existing index.
+  local session_id
+  session_id=$(get_session_target_id "[]" 0 "$WORKING_DIR" "$PROJECT_SCOPE_DIR" 1 || true)
+  if [ -z "$session_id" ]; then
+    log "maintain: no session found for $WORKING_DIR, nothing to do"
+    return 0
+  fi
+  if ! session_has_conversation "$session_id"; then
+    log "maintain: session $session_id has no conversation, skipping"
+    return 0
+  fi
+  log "maintain: processing latest session $session_id for $WORKING_DIR"
+  run_post_session_tasks "$session_id" 0
+}
+
 # ============================================================================
 # Main
 # ============================================================================
+
+# Maintenance-only mode (`opencode-memory maintain`): skip the interactive run
+# and process the latest session directly. Runs in the foreground so a caller
+# (cron, the dashboard on_close hook) can wait for completion.
+if [ "${MAINTAIN_MODE:-0}" = "1" ]; then
+  run_maintain
+  exit 0
+fi
 
 # Step 0: Create timestamp marker before running opencode
 TIMESTAMP_FILE=$(mktemp)
