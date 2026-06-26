@@ -31,6 +31,9 @@
 #                                    interactive opencode (for cron / dashboard
 #                                    on_close). Foreground; honours the same
 #                                    OPENCODE_MEMORY_* model/bin env vars.
+#   dream [--dir DIR]              — one consolidation pass over DIR's live memory
+#                                    store (collapse duplicates, prune stale),
+#                                    bypassing the auto-dream gate. No extraction.
 #
 # Environment variables:
 #   OPENCODE_MEMORY_EXTRACT=0                 — Disable post-session extraction
@@ -227,6 +230,22 @@ case "${1:-}" in
     done
     [ -n "${OPENCODE_MEMORY_DIR:-}" ] && export OPENCODE_MEMORY_DIR
     set --  # maintain does not forward args to opencode
+    ;;
+  dream)
+    # On-demand consolidation: run ONE dream/prune pass over a directory's live
+    # memory store (collapse duplicates, delete stale/invalidated), bypassing the
+    # auto-dream time/session gate. No extraction, no interactive opencode.
+    DREAM_MODE=1
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --dir) OPENCODE_MEMORY_DIR="${2:-}"; shift 2 || shift ;;
+        --dir=*) OPENCODE_MEMORY_DIR="${1#--dir=}"; shift ;;
+        *) shift ;;
+      esac
+    done
+    [ -n "${OPENCODE_MEMORY_DIR:-}" ] && export OPENCODE_MEMORY_DIR
+    set --
     ;;
   self)
     case "${2:-}" in
@@ -1974,6 +1993,50 @@ run_maintain() {
   run_post_session_tasks "$session_id" 0
 }
 
+run_dream_forced() {
+  # One consolidation pass over WORKING_DIR's live memory store, bypassing the
+  # auto-dream time/session gate. Forks a session purely to host the dream agent
+  # (with the memory_* tools); the dream reads/edits the project's memory files,
+  # not that session's conversation.
+  if [ "$AUTODREAM_ENABLED" = "0" ]; then
+    log "dream: auto-dream disabled (OPENCODE_MEMORY_AUTODREAM=0), nothing to do"
+    return 0
+  fi
+  local session_id="" tries=0
+  while [ "$tries" -lt 5 ]; do
+    session_id=$(get_latest_session_for_dir_from_db "$WORKING_DIR" "$PROJECT_SCOPE_DIR" || true)
+    [ -z "$session_id" ] && session_id=$(get_session_target_id "[]" 0 "$WORKING_DIR" "$PROJECT_SCOPE_DIR" 1 || true)
+    [ -n "$session_id" ] && break
+    tries=$((tries + 1))
+    sleep 1
+  done
+  if [ -z "$session_id" ]; then
+    log "dream: no session found for $WORKING_DIR to host the dream agent"
+    return 1
+  fi
+  if ! try_acquire_consolidation_lock; then
+    log "dream: another consolidation is already running, skipping"
+    return 0
+  fi
+  log "dream: consolidating memory for $WORKING_DIR (host session $session_id)"
+  log "dream log: $AUTODREAM_LOG_FILE"
+  local parent_session_title
+  parent_session_title=$(get_session_title_from_db "$session_id" || true)
+  local cmd=("$REAL_OPENCODE" run -s "$session_id" --fork --dir "$WORKING_DIR")
+  [ -n "$AUTODREAM_MODEL" ] && cmd+=(-m "$AUTODREAM_MODEL")
+  [ -n "$AUTODREAM_AGENT" ] && cmd+=(--agent "$AUTODREAM_AGENT")
+  cmd+=("$AUTODREAM_PROMPT")
+  local fork_started_at_ms
+  fork_started_at_ms=$(( $(date +%s) * 1000 ))
+  if "${cmd[@]}" >> "$AUTODREAM_LOG_FILE" 2>&1; then
+    log "dream: consolidation completed"
+  else
+    local code=$?
+    log "dream: consolidation failed (exit code $code). Check $AUTODREAM_LOG_FILE"
+  fi
+  cleanup_forked_sessions "$fork_started_at_ms" "$parent_session_title"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -1983,6 +2046,12 @@ run_maintain() {
 # (cron, the dashboard on_close hook) can wait for completion.
 if [ "${MAINTAIN_MODE:-0}" = "1" ]; then
   run_maintain
+  exit 0
+fi
+
+# Dream-only mode (`opencode-memory dream`): one forced consolidation pass.
+if [ "${DREAM_MODE:-0}" = "1" ]; then
+  run_dream_forced
   exit 0
 fi
 

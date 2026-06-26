@@ -50,6 +50,8 @@ editor integration — the post-session step never runs. For those cases,
 `opencode-memory maintain [--dir DIR]` runs extraction + the auto-dream gate on the latest
 session for `DIR` without starting an interactive opencode, so it can be wired to a cron job
 or an on-close hook. It honours the same `OPENCODE_MEMORY_*` model/bin settings.
+`opencode-memory dream [--dir DIR]` runs a single consolidation pass (collapse duplicates,
+prune stale/invalidated) over `DIR`'s live memory store, bypassing the auto-dream gate.
 
 Extraction is incremental: it records how many user turns a session had when it was last
 extracted, so resuming a session re-mines only the new turns (and skips entirely when
