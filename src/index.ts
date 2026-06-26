@@ -1,7 +1,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
 import { parse, resolve } from "path"
-import { buildMemorySystemPrompt } from "./prompt.js"
+import { buildMemorySystemPrompt, buildIndexLimitWarning } from "./prompt.js"
 import { formatRecalledMemories, recallSelectedMemories, type RecalledMemory } from "./recall.js"
 import { isSupportedRecallSelectorClient, selectRelevantMemoryFilenames, type SessionClient } from "./recallSelector.js"
 import { scanMemoryFiles, getMemoryManifest, type MemoryHeader } from "./memoryScan.js"
@@ -11,9 +11,10 @@ import {
   listMemories,
   searchMemories,
   readMemory,
+  readIndex,
   MEMORY_TYPES,
 } from "./memory.js"
-import { getMemoryDir, findCanonicalGitRoot } from "./paths.js"
+import { getMemoryDir, findCanonicalGitRoot, setLocalMemoryMode, setIndexMaxLines } from "./paths.js"
 import { saveHarnessFeedback, HARNESS_FEEDBACK_CATEGORIES } from "./harness.js"
 
 // Per-turn derived state — overwritten each time messages.transform fires.
@@ -37,6 +38,9 @@ type RecallPrefetch = {
 
 const turnContextBySession = new Map<string, TurnContext>()
 const selectorSessionIDs = new Set<string>()
+// Sessions that have already been shown the index-size-limit warning, so the
+// agent is asked to warn the user at most once per session (see prompt.ts).
+const indexLimitWarnedSessions = new Set<string>()
 
 function shouldIgnoreMemoryContext(query: string | undefined): boolean {
   if (process.env.OPENCODE_MEMORY_IGNORE === "1") return true
@@ -166,6 +170,11 @@ function recordPluginOptions(options: Record<string, unknown> | undefined): void
   pluginRecallModel = asOptionString(options?.recallModel)
   pluginRecallAgent = asOptionString(options?.recallAgent)
   pluginExtraRoots = asOptionStringArray(options?.extraMemoryRoots)
+  // Local (in-repo) memory mode. env OPENCODE_MEMORY_LOCAL still takes
+  // precedence (resolved in paths.ts); always set so a stale mode can't leak in.
+  setLocalMemoryMode(options?.localMemory)
+  // Soft index-size limit. env OPENCODE_MEMORY_INDEX_MAX_LINES takes precedence.
+  setIndexMaxLines(options?.indexMaxLines)
 }
 
 // Additional memory roots whose index is surfaced read-only this session and
@@ -496,6 +505,16 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }, opti
             `Read-only index of another repo's curated memory. To read an entry, call ` +
             `memory_read with root:"${root}". Note: memory_save and memory_delete still ` +
             `target THIS session's repo unless you pass the same root.\n\n${manifest}`
+        }
+      }
+      // Once per session, if the index has hit the configured soft limit, ask the
+      // agent to warn the user and offer compaction. Latched so it isn't repeated
+      // every turn; only when the index is actually loaded (not under ignore).
+      if (!ignoreMemoryContext && sessionID && !indexLimitWarnedSessions.has(sessionID)) {
+        const warning = buildIndexLimitWarning(readIndex(memoryRoot))
+        if (warning) {
+          memoryPrompt += `\n\n${warning}`
+          indexLimitWarnedSessions.add(sessionID)
         }
       }
       output.system.push(memoryPrompt)

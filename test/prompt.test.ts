@@ -2,8 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
-import { buildMemorySystemPrompt } from "../src/prompt.js"
-import { getMemoryDir, getMemoryEntrypoint, getProjectDir, ENTRYPOINT_NAME } from "../src/paths.js"
+import { buildMemorySystemPrompt, buildIndexLimitWarning, countIndexLines } from "../src/prompt.js"
+import { getMemoryDir, getMemoryEntrypoint, getProjectDir, ENTRYPOINT_NAME, setIndexMaxLines } from "../src/paths.js"
 
 const tempDirs: string[] = []
 
@@ -171,5 +171,49 @@ describe("buildMemorySystemPrompt", () => {
     expect(prompt).toContain('--include="*.md"')
     expect(prompt).toContain('--include="*.jsonl"')
     expect(prompt).toContain("narrow search terms")
+  })
+})
+
+describe("buildIndexLimitWarning", () => {
+  const savedEnv = process.env.OPENCODE_MEMORY_INDEX_MAX_LINES
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.OPENCODE_MEMORY_INDEX_MAX_LINES
+    else process.env.OPENCODE_MEMORY_INDEX_MAX_LINES = savedEnv
+    setIndexMaxLines(undefined)
+  })
+
+  const makeIndex = (n: number) =>
+    ["# Memory Index", ...Array.from({ length: n }, (_, i) => `- [m${i}](m${i}.md) — hook ${i}`)].join("\n")
+
+  test("countIndexLines counts trimmed, newline-split lines", () => {
+    expect(countIndexLines("")).toBe(0)
+    expect(countIndexLines("   \n  ")).toBe(0)
+    expect(countIndexLines("a\nb\nc")).toBe(3)
+  })
+
+  test("returns undefined when under the limit", () => {
+    setIndexMaxLines(50)
+    expect(buildIndexLimitWarning(makeIndex(10))).toBeUndefined()
+  })
+
+  test("warns at or over the limit and offers the three compaction strategies", () => {
+    setIndexMaxLines(5)
+    const warning = buildIndexLimitWarning(makeIndex(20))
+    expect(warning).toBeDefined()
+    expect(warning).toContain("size limit reached")
+    expect(warning).toContain("once")
+    expect(warning).toContain("Clustering")
+    expect(warning).toContain("Removing stale")
+    expect(warning).toContain("Shortening")
+  })
+
+  test("disabled (limit 0) never warns even on a huge index", () => {
+    process.env.OPENCODE_MEMORY_INDEX_MAX_LINES = "0"
+    expect(buildIndexLimitWarning(makeIndex(1000))).toBeUndefined()
+  })
+
+  test("empty index never warns", () => {
+    setIndexMaxLines(1)
+    expect(buildIndexLimitWarning("")).toBeUndefined()
   })
 })

@@ -192,7 +192,15 @@ No migration required. If you already have Claude Code memory files, OpenCode ca
 
 ### Where is data stored?
 
-In local files under Claude-style project memory directories (for example, under `~/.claude/projects/<project>/memory/`).
+By default, in local files under Claude-style project memory directories (for example, under `~/.claude/projects/<project>/memory/`) — shared with Claude Code.
+
+You can instead keep memory **inside the repo**, at `<repo>/.claude/memory/`, so it can be committed, diffed, and reviewed alongside the code. Set the in-repo switch `OPENCODE_MEMORY_LOCAL` (or the `localMemory` option in `opencode.json`):
+
+- `off` / `0` — always use the global `~/.claude` store (never local)
+- `on` / `1` — always use the in-repo `<repo>/.claude/memory/` folder (created if absent)
+- `auto` (**default**) — use the in-repo folder **only if it already exists**, otherwise the global store
+
+So the zero-config way to opt a repo into local memory is simply `mkdir -p .claude/memory` — `auto` mode then writes there. Extraction, dreaming, recall, and the `MEMORY.md` index all follow the active directory. The switch keys off the canonical git root, so subdirectories and worktrees of one repo share its local store.
 
 ### Why file-based memory?
 
@@ -207,6 +215,16 @@ Yes. Set `OPENCODE_MEMORY_EXTRACT=0`.
 Yes. Set `OPENCODE_MEMORY_AUTODREAM=0`. You can also tune gates with:
 - `OPENCODE_MEMORY_AUTODREAM_MIN_HOURS`
 - `OPENCODE_MEMORY_AUTODREAM_MIN_SESSIONS`
+
+### Can I cap how large the memory index gets?
+
+Yes. Set a soft line limit for the `MEMORY.md` index via `OPENCODE_MEMORY_INDEX_MAX_LINES` (or the `indexMaxLines` option in `opencode.json`); the default is `200`. Once the index reaches the limit, the agent warns you **once** that session and offers to compact memory by:
+
+- **clustering** near-duplicate or related memories into a single merged file,
+- **removing stale** memories that are outdated or superseded, and
+- **shortening** verbose entries so each index line is a one-line hook.
+
+It only offers — nothing is deleted without your confirmation. Set the limit to `0` (or `off`) to disable the warning. This is independent of the hard cap that truncates what actually gets loaded into context.
 
 ## 🔧 Configuration
 
@@ -224,6 +242,8 @@ Yes. Set `OPENCODE_MEMORY_AUTODREAM=0`. You can also tune gates with:
 - `OPENCODE_MEMORY_AUTODREAM_MIN_SESSIONS` (default `5`): min touched sessions since last consolidation
 - `OPENCODE_MEMORY_AUTODREAM_MODEL`: override model used for auto-dream
 - `OPENCODE_MEMORY_AUTODREAM_AGENT`: override agent used for auto-dream
+- `OPENCODE_MEMORY_LOCAL` (default `auto`): in-repo memory switch — `on` stores memory at `<repo>/.claude/memory/`, `off` forces the global `~/.claude` store, `auto` uses the in-repo folder if it already exists
+- `OPENCODE_MEMORY_INDEX_MAX_LINES` (default `200`): soft size limit for the `MEMORY.md` index — once reached, the agent warns you once and offers to compact memory; set `0` or `off` to disable the warning
 
 ### Model settings via `opencode.json` (recommended)
 
@@ -244,6 +264,8 @@ project config; project wins, and **environment variables still override everyth
         "extractAgent": "...",                         // optional agent overrides
         "dreamAgent":   "...",
         "recallAgent":  "...",
+        "localMemory":  "auto",                         // in-repo memory: on | off | auto (default)
+        "indexMaxLines": 200,                           // warn + offer compaction once MEMORY.md hits this many lines (0 = off)
         "extraMemoryRoots": ["/abs/path/to/other-repo"] // see "Cross-repo memory" below
       }
     }
@@ -267,11 +289,13 @@ OPENCODE_MEMORY_PRINT_SETTINGS=1 opencode run
 # extract.model=opencode/big-pickle
 # dream.model=opencode/big-pickle
 # recall.model=...
+# local.mode=auto
+# index.max_lines=200
 ```
 
 > Note: `extractModel`/`dreamModel` are read by the post-session wrapper directly from
-> `opencode.json`; `recallModel`/`recallAgent` are consumed in-process by the plugin.
-> All share the one `options` block.
+> `opencode.json`; `recallModel`/`recallAgent`, `localMemory`, and `indexMaxLines` are
+> consumed in-process by the plugin. All share the one `options` block.
 
 ### Cross-repo memory (`extraMemoryRoots`)
 

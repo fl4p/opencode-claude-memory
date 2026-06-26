@@ -146,7 +146,103 @@ export function getProjectDir(worktree: string): string {
   return join(getClaudeConfigHomeDir(), "projects", sanitizePath(canonicalRoot))
 }
 
+// ---------------------------------------------------------------------------
+// Local (in-repo) memory mode
+//
+// By default memory lives in the global Claude store
+// (~/.claude/projects/<root>/memory/). Set OPENCODE_MEMORY_LOCAL (or the
+// opencode.json plugin option `localMemory`) to keep memory INSIDE the repo at
+// <gitRoot>/.claude/memory/ so it can be committed, diffed, and reviewed
+// alongside the code.
+//
+//   off / 0 / false / global — always the global store (never local)
+//   on  / 1 / true  / local  — always the in-repo folder (created if absent)
+//   auto (default)           — the in-repo folder ONLY if it already exists,
+//                              otherwise the global store
+//
+// Precedence: env var > plugin option > "auto". The env var ALWAYS wins so a
+// single shell can override per invocation (matching getRecallModel).
+export type LocalMemoryMode = "auto" | "on" | "off"
+
+export const LOCAL_MEMORY_DIRNAME = join(".claude", "memory")
+
+let pluginLocalMemoryMode: LocalMemoryMode | undefined
+
+function parseLocalMemoryMode(raw: unknown): LocalMemoryMode | undefined {
+  if (typeof raw !== "string") return undefined
+  const v = raw.trim().toLowerCase()
+  if (!v) return undefined
+  if (v === "auto") return "auto"
+  if (v === "on" || v === "1" || v === "true" || v === "yes" || v === "local") return "on"
+  if (v === "off" || v === "0" || v === "false" || v === "no" || v === "global") return "off"
+  return undefined
+}
+
+// Captured from the opencode.json plugin `options` block on construction (see
+// index.ts). Always (re)set — never early-return on undefined — or a stale mode
+// from a prior construction would leak in via module state.
+export function setLocalMemoryMode(raw: unknown): void {
+  pluginLocalMemoryMode = parseLocalMemoryMode(raw)
+}
+
+export function getLocalMemoryMode(): LocalMemoryMode {
+  return parseLocalMemoryMode(process.env.OPENCODE_MEMORY_LOCAL) ?? pluginLocalMemoryMode ?? "auto"
+}
+
+// In-repo memory directory: <canonical git root>/.claude/memory. Keyed by the
+// SAME canonical root as the global store, so worktrees of one repo share it.
+export function getLocalMemoryDir(worktree: string): string {
+  const root = findCanonicalGitRoot(worktree) ?? worktree
+  return join(root, LOCAL_MEMORY_DIRNAME)
+}
+
+// ---------------------------------------------------------------------------
+// Index size limit (soft, advisory)
+//
+// A configurable line budget for the MEMORY.md index. When the index reaches it,
+// the plugin asks the agent to warn the user ONCE and offer compaction (cluster
+// duplicates, drop stale, shorten entries). This is SEPARATE from the hard
+// MAX_ENTRYPOINT_LINES cap that truncates what gets loaded into context.
+//
+//   <unset>  — default to MAX_ENTRYPOINT_LINES
+//   0 / off  — disable the warning entirely
+//   N        — warn once the index has N or more lines
+//
+// Precedence: env OPENCODE_MEMORY_INDEX_MAX_LINES > plugin option > default.
+let pluginIndexMaxLines: number | undefined
+
+function parseIndexMaxLines(raw: unknown): number | undefined {
+  if (typeof raw === "string") {
+    const v = raw.trim().toLowerCase()
+    if (!v) return undefined
+    if (v === "off" || v === "none" || v === "false") return 0
+  }
+  const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN
+  if (!Number.isFinite(n)) return undefined
+  return Math.max(0, Math.floor(n))
+}
+
+export function setIndexMaxLines(raw: unknown): void {
+  pluginIndexMaxLines = parseIndexMaxLines(raw)
+}
+
+// Returns 0 when the warning is disabled.
+export function getIndexMaxLines(): number {
+  const env = parseIndexMaxLines(process.env.OPENCODE_MEMORY_INDEX_MAX_LINES)
+  return env ?? pluginIndexMaxLines ?? MAX_ENTRYPOINT_LINES
+}
+
 export function getMemoryDir(worktree: string): string {
+  const mode = getLocalMemoryMode()
+  if (mode !== "off") {
+    const localDir = getLocalMemoryDir(worktree)
+    // "on" forces the in-repo folder (creating it); "auto" adopts it only when
+    // the user has already opted in by creating it.
+    if (mode === "on" || existsSync(localDir)) {
+      ensureDir(localDir)
+      return localDir
+    }
+  }
   const memoryDir = join(getProjectDir(worktree), "memory")
   ensureDir(memoryDir)
   return memoryDir

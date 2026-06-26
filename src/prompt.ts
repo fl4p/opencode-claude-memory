@@ -1,6 +1,6 @@
 import { MEMORY_TYPES } from "./memory.js"
 import { readIndex, truncateEntrypoint } from "./memory.js"
-import { getMemoryDir, ENTRYPOINT_NAME, MAX_ENTRYPOINT_LINES, getProjectDir } from "./paths.js"
+import { getMemoryDir, ENTRYPOINT_NAME, MAX_ENTRYPOINT_LINES, getProjectDir, getIndexMaxLines } from "./paths.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Re-baselined against Claude Code 2.1.178 (the authoritative source, extracted
@@ -272,4 +272,35 @@ export function buildMemorySystemPrompt(
   }
 
   return lines.join("\n")
+}
+
+// Number of lines the index currently occupies, measured the same way the hard
+// cap (truncateEntrypoint) counts them — trimmed, newline-split.
+export function countIndexLines(indexContent: string): number {
+  const trimmed = indexContent.trim()
+  return trimmed ? trimmed.split("\n").length : 0
+}
+
+// When the index has grown to the configured soft limit, returns a prompt block
+// asking the agent to warn the user ONCE and offer to compact. Returns undefined
+// when under the limit or the warning is disabled (limit 0). The caller is
+// responsible for showing it at most once per session (see index.ts latch).
+export function buildIndexLimitWarning(indexContent: string): string | undefined {
+  const limit = getIndexMaxLines()
+  if (limit <= 0) return undefined
+  const lineCount = countIndexLines(indexContent)
+  if (lineCount < limit) return undefined
+
+  return [
+    "## ⚠️ Memory index size limit reached",
+    "",
+    `\`${ENTRYPOINT_NAME}\` now has ${lineCount} lines (configured limit: ${limit}). ` +
+      "Tell the user **once** this session that their memory index has reached its size limit, " +
+      "and offer to compact it — do not repeat this warning if you have already raised it. " +
+      "If the user agrees, compact the memory by:",
+    `- **Clustering** near-duplicate or closely-related memories into a single merged file, then updating ${ENTRYPOINT_NAME}.`,
+    "- **Removing stale** memories that are outdated, superseded, or no longer true (verify before deleting).",
+    "- **Shortening** verbose index entries and overlong memory files so each index entry is a one-line hook.",
+    "Apply changes with the memory_* tools. Never silently delete — confirm removals with the user first.",
+  ].join("\n")
 }
