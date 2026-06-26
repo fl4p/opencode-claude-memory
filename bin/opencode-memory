@@ -1626,11 +1626,11 @@ PY
     return $?
   fi
 
-  # No python3: count user lines with grep. grep -c exits 1 on zero matches, so
-  # tolerate that and normalize to 0.
-  local c
-  c=$(grep -cE '"(type|role)"[[:space:]]*:[[:space:]]*"user"' "$transcript_file" 2>/dev/null || true)
-  printf '%s\n' "${c:-0}"
+  # No python3: a grep over raw JSONL would also match `"role":"user"` embedded in
+  # pasted/discussed content and over-count. Rather than risk a wrong (too-high)
+  # mark that silently skips real turns, report "unknown" so the caller does a
+  # full extraction. (python3 is already required by the rest of the wrapper.)
+  return 1
 }
 
 read_extract_mark() {
@@ -1638,7 +1638,9 @@ read_extract_mark() {
   [ -f "$mark_file" ] || return 1
   local value
   value=$(head -1 "$mark_file" 2>/dev/null | tr -dc '0-9')
-  [ -n "$value" ] || return 1
+  # Reject empty or absurdly long values: a >15-digit count would overflow bash
+  # arithmetic in the `-eq`/`-lt` comparisons and abort under set -e.
+  [ -n "$value" ] && [ "${#value}" -le 15 ] || return 1
   printf '%s\n' "$value"
 }
 
@@ -1648,6 +1650,8 @@ write_extract_mark() {
   [[ "$turns" =~ ^[0-9]+$ ]] || return 0
   mkdir -p "$EXTRACT_MARKS_DIR" 2>/dev/null || return 0
   printf '%s\n' "$turns" > "$EXTRACT_MARKS_DIR/$session_id" 2>/dev/null || true
+  # Bound unbounded growth: marks are tiny, but prune ones untouched for 90 days.
+  find "$EXTRACT_MARKS_DIR" -maxdepth 1 -type f -mtime +90 -delete 2>/dev/null || true
 }
 
 run_extraction_if_needed() {
@@ -1668,25 +1672,34 @@ run_extraction_if_needed() {
 
   if [ "$memory_written_during_session" = "1" ]; then
     log "Main agent already wrote memories during session, skipping extraction"
-    # The live agent curated these turns; advance the mark so a later resume does
-    # not re-mine them.
-    [ -n "$current_turns" ] && write_extract_mark "$session_id" "$current_turns"
+    # Do NOT advance the mark here: has_new_memories() is not session/project
+    # scoped (it sees any memory write under ~/.claude/projects), so a write in
+    # another project would falsely advance this session's mark and permanently
+    # skip turns. Leaving the mark unchanged means a later forked extraction
+    # re-diffs from the last real extraction; EXTRACT_PROMPT dedups via MEMORY.md.
     return 0
   fi
 
-  # Incremental gate: if a prior pass already consumed every user turn this
-  # session currently has, there is nothing new to extract.
+  # Incremental gate. The mark is a monotonic high-water mark of user turns.
+  #   current == mark : nothing new said -> skip.
+  #   current >  mark : re-mine only the delta (inject a boundary note).
+  #   current <  mark : transcript shrank (compaction / reset) -> the mark is
+  #                     stale; do a FULL extraction and let success re-baseline
+  #                     it, rather than skipping forever.
   local prev_turns="" incremental_block=""
   if [ -n "$current_turns" ]; then
     prev_turns=$(read_extract_mark "$session_id" || true)
     if [ -n "$prev_turns" ]; then
-      if [ "$current_turns" -le "$prev_turns" ]; then
+      if [ "$current_turns" -eq "$prev_turns" ]; then
         log "Incremental: session $session_id has no new user turns since last extraction (mark $prev_turns), skipping"
         return 0
+      elif [ "$current_turns" -lt "$prev_turns" ]; then
+        log "Incremental: transcript shrank ($current_turns < mark $prev_turns); treating mark as stale, full extraction"
+      else
+        local delta=$((current_turns - prev_turns))
+        incremental_block="INCREMENTAL EXTRACTION: a prior extraction pass already processed user turns 1-${prev_turns} of this conversation and saved any memories they warranted. Treat those earlier turns as already-extracted CONTEXT — do NOT re-emit memories for them. Mine ONLY the ${delta} new user turn(s) after turn ${prev_turns} for NEW durable memories (you may still read the earlier turns for context). If the new turns warrant nothing, save nothing."
+        log "Incremental: re-mining $delta new user turn(s) since mark $prev_turns (now $current_turns)"
       fi
-      local delta=$((current_turns - prev_turns))
-      incremental_block="INCREMENTAL EXTRACTION: a prior extraction pass already processed user turns 1-${prev_turns} of this conversation and saved any memories they warranted. Treat those earlier turns as already-extracted CONTEXT — do NOT re-emit memories for them. Mine ONLY the ${delta} new user turn(s) after turn ${prev_turns} for NEW durable memories (you may still read the earlier turns for context). If the new turns warrant nothing, save nothing."
-      log "Incremental: re-mining $delta new user turn(s) since mark $prev_turns (now $current_turns)"
     fi
   fi
 

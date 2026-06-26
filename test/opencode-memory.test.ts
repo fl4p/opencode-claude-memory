@@ -1515,6 +1515,13 @@ exit 0
     expect(markValue).toBe("2") // mark untouched
   })
 
+  test("incremental: a shrunk transcript (mark > current) re-baselines with a full extraction instead of skipping forever", () => {
+    const { forkRan, forkArgs, markValue } = runIncremental({ userTurns: 3, mark: 5 })
+    expect(forkRan).toBe(true) // does NOT skip despite current(3) < mark(5)
+    expect(forkArgs).not.toContain("INCREMENTAL EXTRACTION") // full re-mine, no stale boundary
+    expect(markValue).toBe("3") // mark re-baselined down to the current count
+  })
+
   test("incremental: OPENCODE_MEMORY_INCREMENTAL=0 re-mines fully and never writes a mark", () => {
     const { forkRan, forkArgs, markValue } = runIncremental({ userTurns: 2, mark: 5, incrementalEnv: "0" })
     expect(forkRan).toBe(true)
