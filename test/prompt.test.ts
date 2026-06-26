@@ -196,6 +196,15 @@ describe("buildIndexLimitWarning", () => {
     expect(buildIndexLimitWarning(makeIndex(10))).toBeUndefined()
   })
 
+  test("fires exactly AT the limit (>=), not only over it", () => {
+    // makeIndex(n) yields n+1 lines (header + n entries). Pick the limit so the
+    // line count equals it exactly, pinning the >= boundary against an off-by-one.
+    setIndexMaxLines(11)
+    expect(countIndexLines(makeIndex(10))).toBe(11)
+    expect(buildIndexLimitWarning(makeIndex(10))).toBeDefined() // exactly at limit
+    expect(buildIndexLimitWarning(makeIndex(9))).toBeUndefined() // one under
+  })
+
   test("warns at or over the limit and offers the three compaction strategies", () => {
     setIndexMaxLines(5)
     const warning = buildIndexLimitWarning(makeIndex(20))

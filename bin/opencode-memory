@@ -37,7 +37,7 @@
 #   OPENCODE_MEMORY_AUTODREAM_AGENT=...       — Auto-dream agent override
 #   OPENCODE_MEMORY_DIR=...                   — Override working directory for opencode
 #   OPENCODE_MEMORY_LOCAL=auto|on|off         — In-repo memory: on=<repo>/.claude/memory, auto=use it if it exists, off=global store
-#   OPENCODE_MEMORY_INDEX_MAX_LINES=200       — Soft MEMORY.md size limit; agent warns once + offers compaction (0/off disables)
+#   OPENCODE_MEMORY_INDEX_MAX_LINES=160       — Soft MEMORY.md size limit; agent warns once + offers compaction (0/off disables)
 #   OPENCODE_MEMORY_PRINT_SETTINGS=1          — Print resolved extract/dream/recall settings and exit
 #
 # The extraction/dream model+agent can also be set persistently (without env vars)
@@ -399,7 +399,7 @@ if [ "${OPENCODE_MEMORY_PRINT_SETTINGS:-0}" = "1" ]; then
     "${AUTODREAM_MODEL:-<opencode default>}" "${AUTODREAM_AGENT:-<opencode default>}" \
     "${OPENCODE_MEMORY_RECALL_MODEL:-<opencode.json options.recallModel, else default>}" \
     "${OPENCODE_MEMORY_LOCAL:-<opencode.json options.localMemory, else auto>}" \
-    "${OPENCODE_MEMORY_INDEX_MAX_LINES:-<opencode.json options.indexMaxLines, else 200>}"
+    "${OPENCODE_MEMORY_INDEX_MAX_LINES:-<opencode.json options.indexMaxLines, else 160>}"
   exit 0
 fi
 

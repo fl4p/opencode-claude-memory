@@ -209,6 +209,8 @@ export function getLocalMemoryDir(worktree: string): string {
 //   N        — warn once the index has N or more lines
 //
 // Precedence: env OPENCODE_MEMORY_INDEX_MAX_LINES > plugin option > default.
+// Default sits at 80% of the hard cap so the warning lands before truncation.
+export const DEFAULT_INDEX_MAX_LINES = Math.floor(MAX_ENTRYPOINT_LINES * 0.8)
 let pluginIndexMaxLines: number | undefined
 
 function parseIndexMaxLines(raw: unknown): number | undefined {
@@ -218,27 +220,41 @@ function parseIndexMaxLines(raw: unknown): number | undefined {
     if (v === "off" || v === "none" || v === "false") return 0
   }
   const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN
-  if (!Number.isFinite(n)) return undefined
-  return Math.max(0, Math.floor(n))
+  // Negative / non-finite values are treated as UNSET (fall back to the next
+  // layer), not as 0 — so a fat-fingered "-1" can't silently disable the warning
+  // the way an explicit "0"/"off" intentionally does.
+  if (!Number.isFinite(n) || n < 0) return undefined
+  return Math.floor(n)
 }
 
 export function setIndexMaxLines(raw: unknown): void {
   pluginIndexMaxLines = parseIndexMaxLines(raw)
 }
 
-// Returns 0 when the warning is disabled.
+// Returns 0 when the warning is disabled. Defaults below the hard
+// MAX_ENTRYPOINT_LINES cap so the user is warned with some lead time BEFORE the
+// index starts getting truncated, not at the exact moment truncation begins.
 export function getIndexMaxLines(): number {
   const env = parseIndexMaxLines(process.env.OPENCODE_MEMORY_INDEX_MAX_LINES)
-  return env ?? pluginIndexMaxLines ?? MAX_ENTRYPOINT_LINES
+  return env ?? pluginIndexMaxLines ?? DEFAULT_INDEX_MAX_LINES
+}
+
+function isExistingDir(path: string): boolean {
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    return false
+  }
 }
 
 export function getMemoryDir(worktree: string): string {
   const mode = getLocalMemoryMode()
   if (mode !== "off") {
     const localDir = getLocalMemoryDir(worktree)
-    // "on" forces the in-repo folder (creating it); "auto" adopts it only when
-    // the user has already opted in by creating it.
-    if (mode === "on" || existsSync(localDir)) {
+    // "on" forces the in-repo folder (creating it). "auto" adopts it only when
+    // the user has already opted in by creating it AS A DIRECTORY — a stray file
+    // or symlink at that path must not hijack the store or crash the first write.
+    if (mode === "on" || isExistingDir(localDir)) {
       ensureDir(localDir)
       return localDir
     }

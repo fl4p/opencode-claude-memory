@@ -4,13 +4,15 @@ import { tmpdir } from "os"
 import { join } from "path"
 import {
   getMemoryDir,
+  getMemoryEntrypoint,
   getLocalMemoryDir,
   getLocalMemoryMode,
   getProjectDir,
   setLocalMemoryMode,
   setIndexMaxLines,
   getIndexMaxLines,
-  MAX_ENTRYPOINT_LINES,
+  DEFAULT_INDEX_MAX_LINES,
+  ENTRYPOINT_NAME,
   LOCAL_MEMORY_DIRNAME,
 } from "../src/paths.js"
 
@@ -55,8 +57,9 @@ afterEach(() => {
 })
 
 describe("index size limit resolution", () => {
-  test("defaults to MAX_ENTRYPOINT_LINES", () => {
-    expect(getIndexMaxLines()).toBe(MAX_ENTRYPOINT_LINES)
+  test("defaults below the hard cap (lead time before truncation)", () => {
+    expect(getIndexMaxLines()).toBe(DEFAULT_INDEX_MAX_LINES)
+    expect(DEFAULT_INDEX_MAX_LINES).toBeLessThan(200) // MAX_ENTRYPOINT_LINES
   })
 
   test("env var overrides the plugin option", () => {
@@ -72,10 +75,17 @@ describe("index size limit resolution", () => {
     expect(getIndexMaxLines()).toBe(90)
   })
 
-  test("0 / off disables the warning and is not overridden by the default", () => {
+  test("0 / off disables the warning via env and is not overridden by the default", () => {
     process.env.OPENCODE_MEMORY_INDEX_MAX_LINES = "0"
     expect(getIndexMaxLines()).toBe(0)
     process.env.OPENCODE_MEMORY_INDEX_MAX_LINES = "off"
+    expect(getIndexMaxLines()).toBe(0)
+  })
+
+  test("0 / off disables via the plugin option too (0 must not fall through)", () => {
+    setIndexMaxLines(0)
+    expect(getIndexMaxLines()).toBe(0)
+    setIndexMaxLines("off")
     expect(getIndexMaxLines()).toBe(0)
   })
 
@@ -83,6 +93,20 @@ describe("index size limit resolution", () => {
     setIndexMaxLines(75)
     process.env.OPENCODE_MEMORY_INDEX_MAX_LINES = "banana"
     expect(getIndexMaxLines()).toBe(75)
+  })
+
+  test("negative value is treated as unset (falls back), NOT as disable", () => {
+    setIndexMaxLines(75)
+    process.env.OPENCODE_MEMORY_INDEX_MAX_LINES = "-1"
+    expect(getIndexMaxLines()).toBe(75) // negative env ignored → plugin option used
+    delete process.env.OPENCODE_MEMORY_INDEX_MAX_LINES
+    setIndexMaxLines(-5)
+    expect(getIndexMaxLines()).toBe(DEFAULT_INDEX_MAX_LINES) // negative option → default
+  })
+
+  test("floors fractional values", () => {
+    setIndexMaxLines(90.7)
+    expect(getIndexMaxLines()).toBe(90)
   })
 })
 
@@ -143,6 +167,31 @@ describe("getMemoryDir — auto mode", () => {
     const localDir = getLocalMemoryDir(repo)
     mkdirSync(localDir, { recursive: true })
     expect(getMemoryDir(repo)).toBe(localDir)
+  })
+
+  test("a stray FILE at the local path is not adopted (falls back to global, no crash)", () => {
+    const repo = makeTempGitRepo()
+    const localDir = getLocalMemoryDir(repo)
+    mkdirSync(join(repo, ".claude"), { recursive: true })
+    writeFileSync(localDir, "not a directory", "utf-8") // file named "memory"
+    expect(getMemoryDir(repo)).toBe(join(getProjectDir(repo), "memory"))
+  })
+})
+
+describe("getMemoryDir — env precedence (reverse direction)", () => {
+  test("env off overrides plugin option on", () => {
+    const repo = makeTempGitRepo()
+    setLocalMemoryMode("on")
+    process.env.OPENCODE_MEMORY_LOCAL = "off"
+    expect(getMemoryDir(repo)).toBe(join(getProjectDir(repo), "memory"))
+  })
+})
+
+describe("getMemoryEntrypoint follows the active mode", () => {
+  test("resolves MEMORY.md inside the local dir under on mode", () => {
+    const repo = makeTempGitRepo()
+    setLocalMemoryMode("on")
+    expect(getMemoryEntrypoint(repo)).toBe(join(getLocalMemoryDir(repo), ENTRYPOINT_NAME))
   })
 })
 
