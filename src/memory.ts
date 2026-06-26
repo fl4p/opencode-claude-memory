@@ -5,12 +5,14 @@ import {
   getMemoryEntrypoint,
   ENTRYPOINT_NAME,
   validateMemoryFileName,
+  shouldRedactInRepoMemory,
   MAX_MEMORY_FILES,
   MAX_MEMORY_FILE_BYTES,
   MAX_ENTRYPOINT_LINES,
   MAX_ENTRYPOINT_BYTES,
   FRONTMATTER_MAX_LINES,
 } from "./paths.js"
+import { scrubMemoryFields } from "./redact.js"
 
 export const MEMORY_TYPES = ["user", "feedback", "project", "reference"] as const
 export type MemoryType = (typeof MEMORY_TYPES)[number]
@@ -170,6 +172,18 @@ export function saveMemory(
   const safeName = validateMemoryFileName(fileName)
   const memDir = getMemoryDir(worktree)
   const filePath = join(memDir, safeName)
+
+  // In-repo memory may be committed/pushed — scrub credential VALUES before
+  // writing (the global ~/.claude store is left as-is). Covers every write path
+  // including post-session extraction. No-op for global mode or when the user
+  // opted into in-repo secrets. The scrub also flows into the MEMORY.md index
+  // pointer below, since it runs on name/description too.
+  if (shouldRedactInRepoMemory(worktree)) {
+    const scrubbed = scrubMemoryFields({ name, description, content })
+    name = scrubbed.name
+    description = scrubbed.description
+    content = scrubbed.content
+  }
 
   const fileContent = `${buildFrontmatter(name, description, type, originSessionId, created)}\n\n${content.trim()}\n`
   if (Buffer.byteLength(fileContent, "utf-8") > MAX_MEMORY_FILE_BYTES) {

@@ -197,6 +197,50 @@ export function getLocalMemoryDir(worktree: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// In-repo secret policy
+//
+// Secret VALUES are acceptable in the GLOBAL ~/.claude store (private to the
+// user) but NOT in an in-repo .claude/memory store, which may be committed and
+// pushed (even a private repo can later go public). So writes to in-repo memory
+// are run through a deterministic credential scrub UNLESS the user explicitly
+// opts in via OPENCODE_MEMORY_LOCAL_SECRETS / opencode.json `localMemorySecrets`.
+let pluginLocalMemorySecrets: boolean | undefined
+
+function parseBoolish(raw: unknown): boolean | undefined {
+  if (typeof raw === "boolean") return raw
+  if (typeof raw !== "string") return undefined
+  const v = raw.trim().toLowerCase()
+  if (!v) return undefined
+  if (v === "on" || v === "1" || v === "true" || v === "yes" || v === "allow") return true
+  if (v === "off" || v === "0" || v === "false" || v === "no" || v === "deny") return false
+  return undefined
+}
+
+export function setLocalMemorySecretsAllowed(raw: unknown): void {
+  pluginLocalMemorySecrets = parseBoolish(raw)
+}
+
+// Default false: scrub by default. env > plugin option > false.
+export function localMemorySecretsAllowed(): boolean {
+  return parseBoolish(process.env.OPENCODE_MEMORY_LOCAL_SECRETS) ?? pluginLocalMemorySecrets ?? false
+}
+
+// True when the active store for this worktree is the in-repo folder (NOT the
+// global ~/.claude store). Compared without mutating state — it does not create
+// directories, unlike getMemoryDir.
+export function isInRepoMemory(worktree: string): boolean {
+  const mode = getLocalMemoryMode()
+  if (mode === "off") return false
+  if (mode === "on") return true
+  return isExistingDir(getLocalMemoryDir(worktree)) // auto: only if already adopted
+}
+
+// True when a write to this worktree's memory must be scrubbed of secret values.
+export function shouldRedactInRepoMemory(worktree: string): boolean {
+  return isInRepoMemory(worktree) && !localMemorySecretsAllowed()
+}
+
+// ---------------------------------------------------------------------------
 // Index size limit (soft, advisory)
 //
 // A configurable line budget for the MEMORY.md index. When the index reaches it,

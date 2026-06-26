@@ -202,7 +202,7 @@ You can instead keep memory **inside the repo**, at `<repo>/.claude/memory/`, so
 
 So the zero-config way to opt a repo into local memory is simply `mkdir -p .claude/memory` — `auto` mode then writes there. Extraction, dreaming, recall, and the `MEMORY.md` index all follow the active directory. The switch keys off the canonical git root, so subdirectories and **linked worktrees** of one repo share the canonical (main) checkout's store — a worktree session writes into the main checkout's `.claude/memory`, not the worktree's own tree.
 
-> ⚠️ **In-repo memory can be committed — review before pushing.** Memories are extracted from your sessions and may contain sensitive content; secret protection is currently prompt-level only (no deterministic scrubber in `memory_save`). Treat `.claude/memory/` like any other source you'd review in a diff, and don't push memories you wouldn't want in the repo's history.
+> 🔒 **Secrets in in-repo memory are scrubbed by default.** The global `~/.claude` store is private to you, so secret values are kept as-is there. But an in-repo `.claude/memory/` can be committed and pushed, so writes to it run through a deterministic credential scrub (`«REDACTED»`) that catches the common `<keyword> is/= <value>` and `<keyword> \`<value>\`` forms (passwords, API keys, tokens, WiFi/PSK, …). This is belt-and-suspenders, not a guarantee — a value phrased with no keyword cue can still slip through, so still review `.claude/memory/` before pushing. If you intentionally want secrets stored in-repo, set `OPENCODE_MEMORY_LOCAL_SECRETS` (or `localMemorySecrets` in `opencode.json`) to disable the scrub.
 
 ### Why file-based memory?
 
@@ -246,6 +246,7 @@ It only offers — nothing is deleted without your confirmation. Set the limit t
 - `OPENCODE_MEMORY_AUTODREAM_AGENT`: override agent used for auto-dream
 - `OPENCODE_MEMORY_LOCAL` (default `auto`): in-repo memory switch — `on` stores memory at `<repo>/.claude/memory/`, `off` forces the global `~/.claude` store, `auto` uses the in-repo folder if it already exists
 - `OPENCODE_MEMORY_INDEX_MAX_LINES` (default `160`): soft size limit for the `MEMORY.md` index — once reached, the agent warns you once and offers to compact memory; set `0` or `off` to disable the warning. (Sits below the hard 200-line cap so you get lead time before the index is truncated.)
+- `OPENCODE_MEMORY_LOCAL_SECRETS` (default `off`): when `on`, allow secret values to be written to **in-repo** `.claude/memory` (disables the deterministic credential scrub). The global `~/.claude` store is never scrubbed regardless.
 
 ### Model settings via `opencode.json` (recommended)
 
@@ -267,6 +268,7 @@ project config; project wins, and **environment variables still override everyth
         "dreamAgent":   "...",
         "recallAgent":  "...",
         "localMemory":  "auto",                         // in-repo memory: on | off | auto (default)
+        "localMemorySecrets": false,                    // allow secret values in in-repo .claude/memory (default false → scrubbed)
         "indexMaxLines": 160,                           // warn + offer compaction once MEMORY.md hits this many lines (default 160, 0 = off)
         "extraMemoryRoots": ["/abs/path/to/other-repo"] // see "Cross-repo memory" below
       }
@@ -292,12 +294,13 @@ OPENCODE_MEMORY_PRINT_SETTINGS=1 opencode run
 # dream.model=opencode/big-pickle
 # recall.model=<opencode.json options.recallModel, else default>
 # local.mode=<opencode.json options.localMemory, else auto>
+# local.secrets=<opencode.json options.localMemorySecrets, else off>
 # index.max_lines=<opencode.json options.indexMaxLines, else 160>
 ```
 
 > Note: `extractModel`/`dreamModel` are resolved by the post-session wrapper directly
 > from `opencode.json`, so those lines show the concrete value. `recallModel`,
-> `localMemory`, and `indexMaxLines` are consumed **in-process by the plugin** — the
+> `localMemory`, `localMemorySecrets`, and `indexMaxLines` are consumed **in-process by the plugin** — the
 > wrapper only echoes their env var, otherwise printing the `<opencode.json options.…>`
 > placeholder shown above. They still take effect; they just aren't resolved by this
 > command unless set via the matching env var. All share the one `options` block.

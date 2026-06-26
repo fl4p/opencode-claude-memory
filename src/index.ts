@@ -14,7 +14,15 @@ import {
   readIndex,
   MEMORY_TYPES,
 } from "./memory.js"
-import { getMemoryDir, findCanonicalGitRoot, setLocalMemoryMode, setIndexMaxLines } from "./paths.js"
+import {
+  getMemoryDir,
+  findCanonicalGitRoot,
+  setLocalMemoryMode,
+  setIndexMaxLines,
+  setLocalMemorySecretsAllowed,
+  shouldRedactInRepoMemory,
+} from "./paths.js"
+import { scrubMemoryFields } from "./redact.js"
 import { saveHarnessFeedback, HARNESS_FEEDBACK_CATEGORIES } from "./harness.js"
 
 // Per-turn derived state — overwritten each time messages.transform fires.
@@ -175,6 +183,9 @@ function recordPluginOptions(options: Record<string, unknown> | undefined): void
   setLocalMemoryMode(options?.localMemory)
   // Soft index-size limit. env OPENCODE_MEMORY_INDEX_MAX_LINES takes precedence.
   setIndexMaxLines(options?.indexMaxLines)
+  // Allow secret values in IN-REPO memory (off by default). env
+  // OPENCODE_MEMORY_LOCAL_SECRETS takes precedence.
+  setLocalMemorySecretsAllowed(options?.localMemorySecrets)
 }
 
 // Additional memory roots whose index is surfaced read-only this session and
@@ -575,17 +586,35 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }, opti
             typeof (ctx as { sessionID?: unknown })?.sessionID === "string"
               ? (ctx as { sessionID?: string }).sessionID
               : undefined
+          // For in-repo memory, scrub credential values first and tell the user
+          // when something was caught (the scrub also runs inside saveMemory as
+          // the safety net for non-tool callers; here it surfaces the count).
+          let saveName = args.name
+          let saveDescription = args.description
+          let saveContent = args.content
+          let redactionNote = ""
+          if (shouldRedactInRepoMemory(r.root)) {
+            const s = scrubMemoryFields({ name: saveName, description: saveDescription, content: saveContent })
+            saveName = s.name
+            saveDescription = s.description
+            saveContent = s.content
+            if (s.count > 0) {
+              redactionNote =
+                ` 🔒 Redacted ${s.count} credential value(s) before writing to in-repo memory ` +
+                `(secrets are kept out of committable .claude/memory; set localMemorySecrets to allow them).`
+            }
+          }
           const filePath = saveMemory(
             r.root,
             args.file_name,
-            args.name,
-            args.description,
+            saveName,
+            saveDescription,
             args.type,
-            args.content,
+            saveContent,
             originSessionId,
             args.created,
           )
-          return `Memory saved to ${filePath}`
+          return `Memory saved to ${filePath}.${redactionNote}`
         },
       }),
 

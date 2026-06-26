@@ -38,6 +38,7 @@
 #   OPENCODE_MEMORY_DIR=...                   — Override working directory for opencode
 #   OPENCODE_MEMORY_LOCAL=auto|on|off         — In-repo memory: on=<repo>/.claude/memory, auto=use it if it exists, off=global store
 #   OPENCODE_MEMORY_INDEX_MAX_LINES=160       — Soft MEMORY.md size limit; agent warns once + offers compaction (0/off disables)
+#   OPENCODE_MEMORY_LOCAL_SECRETS=0           — Allow secret values in in-repo .claude/memory (default 0: scrubbed; global ~/.claude never scrubbed)
 #   OPENCODE_MEMORY_PRINT_SETTINGS=1          — Print resolved extract/dream/recall settings and exit
 #
 # The extraction/dream model+agent can also be set persistently (without env vars)
@@ -394,11 +395,12 @@ fi
 
 # Verify resolved settings (env + opencode.json) without launching a session.
 if [ "${OPENCODE_MEMORY_PRINT_SETTINGS:-0}" = "1" ]; then
-  printf 'extract.model=%s\nextract.agent=%s\ndream.model=%s\ndream.agent=%s\nrecall.model=%s\nlocal.mode=%s\nindex.max_lines=%s\n' \
+  printf 'extract.model=%s\nextract.agent=%s\ndream.model=%s\ndream.agent=%s\nrecall.model=%s\nlocal.mode=%s\nlocal.secrets=%s\nindex.max_lines=%s\n' \
     "${EXTRACT_MODEL:-<opencode default>}" "${EXTRACT_AGENT:-<opencode default>}" \
     "${AUTODREAM_MODEL:-<opencode default>}" "${AUTODREAM_AGENT:-<opencode default>}" \
     "${OPENCODE_MEMORY_RECALL_MODEL:-<opencode.json options.recallModel, else default>}" \
     "${OPENCODE_MEMORY_LOCAL:-<opencode.json options.localMemory, else auto>}" \
+    "${OPENCODE_MEMORY_LOCAL_SECRETS:-<opencode.json options.localMemorySecrets, else off>}" \
     "${OPENCODE_MEMORY_INDEX_MAX_LINES:-<opencode.json options.indexMaxLines, else 160>}"
   exit 0
 fi
