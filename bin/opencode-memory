@@ -744,7 +744,30 @@ get_latest_session_for_dir_from_db() {
   python3 - "$db_path" "$workdir" "$project_dir" <<'PY'
 import os, re, sqlite3, sys
 db, workdir, project_dir = sys.argv[1:4]
-scope = {os.path.realpath(p) for p in (workdir, project_dir) if p}
+SCOPE_ROOT = os.path.realpath(project_dir) if project_dir else ""
+WORKDIR = os.path.realpath(workdir) if workdir else ""
+def _git_root(d):
+    cur = os.path.realpath(d)
+    while True:
+        if os.path.exists(os.path.join(cur, ".git")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+def in_scope(d):
+    # The store is per git-root, so a session anywhere INSIDE the repo (incl.
+    # child dirs like lib/taxes) belongs to it — but not a nested submodule
+    # (different git root -> different store).
+    if not d:
+        return False
+    rd = os.path.realpath(d)
+    if rd == WORKDIR or rd == SCOPE_ROOT:
+        return True
+    if SCOPE_ROOT and rd.startswith(SCOPE_ROOT + os.sep):
+        gr = _git_root(rd)
+        return gr is None or gr == SCOPE_ROOT  # same repo (dir gone -> best-effort)
+    return False
 SUBAGENT = re.compile(r"subagent|\(fork #", re.I)
 try:
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
@@ -761,8 +784,7 @@ for r in rows:
         continue
     if r["title"] and SUBAGENT.search(r["title"]):  # sub-agent / fork by title
         continue
-    d = r["directory"] or ""
-    if d and os.path.realpath(d) in scope:
+    if in_scope(r["directory"]):
         print(r["id"])
         break
 PY
@@ -996,9 +1018,28 @@ before_ids = {item.get("id") for item in before if item.get("id")}
 workdir = normalize(workdir)
 project_dir = normalize(project_dir)
 
+def _git_root(d):
+    cur = os.path.realpath(d)
+    while True:
+        if os.path.exists(os.path.join(cur, ".git")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+
 def in_scope(item):
+    # Repo-wide: any session inside project_dir (the git root) shares the store,
+    # incl. child dirs (lib/taxes, lib/exec) — but not a nested submodule.
     directory = normalize(item.get("directory", ""))
-    return directory != "" and directory in {workdir, project_dir}
+    if directory == "":
+        return False
+    if directory == workdir or directory == project_dir:
+        return True
+    if project_dir and directory.startswith(project_dir + os.sep):
+        gr = _git_root(directory)
+        return gr is None or gr == project_dir
+    return False
 
 def choose(candidates):
     ranked = sorted(
@@ -1322,7 +1363,27 @@ import sys
 
 db_path, started_at_ms_raw, parent_title, workdir, project_dir = sys.argv[1:6]
 started_at_ms = int(started_at_ms_raw or "0")
-scope = {os.path.realpath(path) for path in (workdir, project_dir) if path}
+SCOPE_ROOT = os.path.realpath(project_dir) if project_dir else ""
+WORKDIR = os.path.realpath(workdir) if workdir else ""
+def _git_root(d):
+    cur = os.path.realpath(d)
+    while True:
+        if os.path.exists(os.path.join(cur, ".git")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+def in_scope(d):
+    if not d:
+        return False
+    rd = os.path.realpath(d)
+    if rd == WORKDIR or rd == SCOPE_ROOT:
+        return True
+    if SCOPE_ROOT and rd.startswith(SCOPE_ROOT + os.sep):
+        gr = _git_root(rd)
+        return gr is None or gr == SCOPE_ROOT
+    return False
 title_pattern = re.compile(rf"^{re.escape(parent_title)} \(fork #\d+\)$")
 
 try:
@@ -1343,7 +1404,7 @@ matches = []
 for session_id, title, directory, time_created in rows:
     if not session_id or not title or not directory or not time_created:
         continue
-    if os.path.realpath(directory) not in scope:
+    if not in_scope(directory):
         continue
     if not title_pattern.match(title):
         continue
