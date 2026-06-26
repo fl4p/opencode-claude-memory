@@ -13,6 +13,7 @@ transcripts) and cross-referenced with `auto-memory/replay-and-extraction-design
 | [local-inference.md](local-inference.md) | Running models locally on a 36GB Mac — OOM solving, in-process vs HTTP server, MoE vs dense, mlx-lm vs mlx-vlm, footprint numbers, the dead-ends |
 | [dreaming-and-consolidation.md](dreaming-and-consolidation.md) | Auto-dream (cluster/merge/prune stale), gating thresholds, live-tool-loop vs plan prompt, fail-safe-but-not-lossless + the over-merge bug |
 | [memory-eval.md](memory-eval.md) | How memory extraction is evaluated — fixtures + at-scale replay, the two-phase `EXTRACT_PROMPT`, redaction findings |
+| [recall-quality.md](recall-quality.md) | How the per-turn recall selector is evaluated, and a model comparison (local Gemma, GLM-4.6/5.2, Kimi, gpt-oss, deepseek, qwen) — why the best extractor is not the best selector |
 | [secrets-and-redaction.md](secrets-and-redaction.md) | The deterministic credential scrub, the 2-pass concentration eval, the global-vs-in-repo policy, what protects production |
 
 ## Current shipped state (2026-06-26)
