@@ -706,6 +706,40 @@ get_opencode_db_path() {
   esac
 }
 
+get_latest_session_for_dir_from_db() {
+  # Most-recently-updated REAL (non-fork) session whose directory is WORKING_DIR
+  # or PROJECT_SCOPE_DIR, read straight from the opencode SQLite DB. Robust where
+  # `opencode session list --format json` is flaky/empty (observed on some builds);
+  # this is the same DB-direct approach replay_memories.py uses.
+  local workdir="$1"
+  local project_dir="$2"
+  local db_path
+  db_path=$(get_opencode_db_path)
+  [ -f "$db_path" ] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$db_path" "$workdir" "$project_dir" <<'PY'
+import os, sqlite3, sys
+db, workdir, project_dir = sys.argv[1:4]
+scope = {os.path.realpath(p) for p in (workdir, project_dir) if p}
+try:
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    rows = con.execute(
+        "SELECT id, directory, parent_id FROM session ORDER BY time_updated DESC"
+    ).fetchall()
+    con.close()
+except Exception:
+    raise SystemExit(1)
+for r in rows:
+    if r["parent_id"]:            # skip forked/child sessions (incl. our extraction forks)
+        continue
+    d = r["directory"] or ""
+    if d and os.path.realpath(d) in scope:
+        print(r["id"])
+        break
+PY
+}
+
 get_session_title_from_db() {
   local session_id="$1"
   local db_path
@@ -1912,10 +1946,12 @@ run_maintain() {
   # deduping against MEMORY.md (plus the incremental high-water mark when a
   # transcript mirror is present).
   # Resolve with a short retry: on_close fires right after SIGTERM, so the
-  # session may need a beat to appear in `session list`.
+  # session may need a beat to settle. Prefer the DB-direct lookup (reliable),
+  # fall back to `session list` for builds/setups where the DB shape differs.
   local session_id="" tries=0
   while [ "$tries" -lt 5 ]; do
-    session_id=$(get_session_target_id "[]" 0 "$WORKING_DIR" "$PROJECT_SCOPE_DIR" 1 || true)
+    session_id=$(get_latest_session_for_dir_from_db "$WORKING_DIR" "$PROJECT_SCOPE_DIR" || true)
+    [ -z "$session_id" ] && session_id=$(get_session_target_id "[]" 0 "$WORKING_DIR" "$PROJECT_SCOPE_DIR" 1 || true)
     [ -n "$session_id" ] && break
     tries=$((tries + 1))
     sleep 1
