@@ -1,6 +1,9 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
 import { parse, resolve } from "path"
+import { spawn } from "node:child_process"
+import { existsSync } from "node:fs"
+import { fileURLToPath } from "node:url"
 import { buildMemorySystemPrompt, buildIndexLimitWarning } from "./prompt.js"
 import { formatRecalledMemories, recallSelectedMemories, type RecalledMemory } from "./recall.js"
 import { isSupportedRecallSelectorClient, selectRelevantMemoryFilenames, type SessionClient } from "./recallSelector.js"
@@ -52,6 +55,11 @@ const selectorSessionIDs = new Set<string>()
 // Sessions that have already been shown the index-size-limit warning, so the
 // agent is asked to warn the user at most once per session (see prompt.ts).
 const indexLimitWarnedSessions = new Set<string>()
+
+// Pending idle-triggered `opencode-memory maintain` runs, keyed by sessionID.
+// A session.idle event arms a debounce timer; a new chat.message clears it, so
+// maintenance fires once the conversation actually goes quiet — not every turn.
+const idleMaintainTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 function shouldIgnoreMemoryContext(query: string | undefined): boolean {
   if (process.env.OPENCODE_MEMORY_IGNORE === "1") return true
@@ -163,9 +171,20 @@ function extractRecentTools(
 let pluginRecallModel: string | undefined
 let pluginRecallAgent: string | undefined
 let pluginExtraRoots: string[] = []
+let pluginMaintainOnIdle: boolean | undefined
 
 function asOptionString(v: unknown): string | undefined {
   return typeof v === "string" && v.trim() ? v.trim() : undefined
+}
+
+function asOptionBool(v: unknown): boolean | undefined {
+  if (typeof v === "boolean") return v
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase()
+    if (["1", "true", "yes", "on"].includes(s)) return true
+    if (["0", "false", "no", "off"].includes(s)) return false
+  }
+  return undefined
 }
 
 function asOptionStringArray(v: unknown): string[] {
@@ -193,6 +212,12 @@ function recordPluginOptions(options: Record<string, unknown> | undefined): void
   // (off by default; secrets are allowed in ~/.claude). env
   // OPENCODE_MEMORY_REDACT_GLOBAL takes precedence.
   setRedactGlobalSecrets(options?.redactGlobalSecrets)
+  // Run `opencode-memory maintain` automatically when the session goes idle, so
+  // post-session extraction works for ANY launch (dashboard tile, bare CLI,
+  // editor) without the wrapper or a dashboard on_close hook. Off by default to
+  // avoid double-extraction when opencode IS run through the wrapper. env
+  // OPENCODE_MEMORY_MAINTAIN_ON_IDLE takes precedence.
+  pluginMaintainOnIdle = asOptionBool(options?.maintainOnIdle)
 }
 
 // Additional memory roots whose index is surfaced read-only this session and
@@ -363,6 +388,68 @@ function getCallID(ctx: unknown): string | undefined {
   return typeof v === "string" ? v : undefined
 }
 
+// Idle-maintain: env OPENCODE_MEMORY_MAINTAIN_ON_IDLE > plugin option > false.
+function isMaintainOnIdleEnabled(): boolean {
+  const env = asOptionBool(process.env.OPENCODE_MEMORY_MAINTAIN_ON_IDLE)
+  return env ?? pluginMaintainOnIdle ?? false
+}
+
+// Debounce window: wait this long after the last idle before spawning maintain,
+// so a quick follow-up turn cancels it. env OPENCODE_MEMORY_MAINTAIN_IDLE_SECONDS,
+// default 30s.
+function getMaintainIdleDelayMs(): number {
+  const raw = process.env.OPENCODE_MEMORY_MAINTAIN_IDLE_SECONDS
+  const n = raw ? Number.parseInt(raw, 10) : NaN
+  return (Number.isFinite(n) && n > 0 ? n : 30) * 1000
+}
+
+// The wrapper lives next to the compiled plugin (../bin/opencode-memory). Fall
+// back to a PATH lookup if that resolution fails (e.g. an unusual install).
+function resolveMaintainBin(): string {
+  try {
+    const p = fileURLToPath(new URL("../bin/opencode-memory", import.meta.url))
+    if (existsSync(p)) return p
+  } catch {
+    /* fall through to PATH */
+  }
+  return "opencode-memory"
+}
+
+function spawnMaintain(dir: string): void {
+  if (!dir) return
+  try {
+    // Detached + unref'd so it outlives this turn and never blocks the session.
+    // The wrapper's own per-repo lock serialises overlapping maintain runs.
+    const child = spawn(resolveMaintainBin(), ["maintain", "--dir", dir], {
+      detached: true,
+      stdio: "ignore",
+      env: process.env,
+    })
+    child.unref()
+  } catch {
+    /* best-effort; never disrupt the session */
+  }
+}
+
+function clearMaintainTimer(sessionID: string): void {
+  const t = idleMaintainTimers.get(sessionID)
+  if (t) {
+    clearTimeout(t)
+    idleMaintainTimers.delete(sessionID)
+  }
+}
+
+function armMaintainTimer(sessionID: string, dir: string): void {
+  clearMaintainTimer(sessionID)
+  const t = setTimeout(() => {
+    idleMaintainTimers.delete(sessionID)
+    spawnMaintain(dir)
+  }, getMaintainIdleDelayMs())
+  // Don't let a pending timer keep the runtime alive on shutdown.
+  ;(t as { unref?: () => void }).unref?.()
+  idleMaintainTimers.set(sessionID, t)
+}
+
 export const MemoryPlugin: Plugin = async ({ worktree, directory, client }, options) => {
   directory ??= worktree
   recordPluginOptions(options)
@@ -414,6 +501,26 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }, opti
         ...output.options,
         maxOutputTokens: 256,
       }
+    },
+
+    // Idle-triggered post-session extraction (opt-in). When the session goes
+    // quiet, debounce-spawn `opencode-memory maintain` so extraction works for
+    // any launch without the wrapper or a dashboard on_close hook. A new turn
+    // (chat.message) cancels the pending run so it fires only once per quiet
+    // period; the wrapper's incremental high-water mark makes repeats cheap.
+    event: async ({ event }) => {
+      if (!isMaintainOnIdleEnabled()) return
+      const ev = event as { type?: string; properties?: { sessionID?: unknown } }
+      const sid = typeof ev?.properties?.sessionID === "string" ? ev.properties.sessionID : undefined
+      // Only sessions this plugin instance actually served (same project), and
+      // never the recall selector's own hidden child sessions.
+      if (!sid || !turnContextBySession.has(sid) || selectorSessionIDs.has(sid)) return
+      if (ev.type === "session.idle") armMaintainTimer(sid, directory ?? memoryRoot)
+    },
+
+    "chat.message": async (input) => {
+      // The conversation resumed — cancel any pending idle-maintain.
+      if (isMaintainOnIdleEnabled()) clearMaintainTimer(input.sessionID)
     },
 
     "tool.execute.after": async (input, output) => {
