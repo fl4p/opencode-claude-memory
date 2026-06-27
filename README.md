@@ -10,8 +10,9 @@ keeping the upstream store and format and adding the items below. Design notes a
 ## What this fork adds
 
 - **Post-session memory extraction** — after a session it mines the transcript for durable
-  memories. Extraction/dream/recall models are configurable; default is GLM-4.6
-  (`opencode/big-pickle`).
+  memories. Extraction/dream/recall models are configurable; left unset, extraction reuses
+  the session's own model so the fork hits a warm prompt cache (set `extractModel` to pin a
+  dedicated extractor like GLM-4.6 / `opencode/big-pickle`).
 - **Dream consolidation** — a periodic pass collapses duplicate memories and prunes stale or
   invalidated ones, keeping the store small and current.
 - **In-repo memory** — store memory at `<repo>/.claude/memory/` instead of the global
@@ -51,10 +52,16 @@ The plugin injects the memory prompt and surfaces relevant memories via LLM reca
 ### After a session
 
 The shell hook wraps `opencode`. After each session it forks the session to extract memory
-(if none was written) — forking reuses the already-loaded conversation context (warm cache)
-rather than re-feeding a transcript to a fresh model. It then runs a consolidation pass if
-the auto-dream gate passes (by default 24h since the last run and 5 touched sessions).
-Maintenance runs in the background unless `OPENCODE_MEMORY_FOREGROUND=1`.
+(if none was written). Forking replays the session's own conversation context to the
+extractor rather than serializing a transcript, and **by default extraction runs on the
+session's own model** — so the fork lands on a warm prompt cache and the pass is cheap
+(it only pays for the new extraction turn, not a re-read of the whole conversation). Pin a
+*different* `extractModel` (e.g. a dedicated cheaper or stronger extractor like GLM-4.6) and
+that model has no shared cache, so it must prefill the entire conversation as fresh input —
+better extraction, higher token cost. Disable the session-model matching with
+`OPENCODE_MEMORY_MATCH_SESSION_MODEL=0`. It then runs a consolidation pass if the auto-dream
+gate passes (by default 24h since the last run and 5 touched sessions). Maintenance runs in
+the background unless `OPENCODE_MEMORY_FOREGROUND=1`.
 
 ### When opencode isn't wrapped
 
@@ -127,7 +134,8 @@ Each setting is an env var or an `opencode.json` option. Precedence: env var, th
 | `OPENCODE_MEMORY_INCREMENTAL` | `1` | `0` re-mines the whole session on each resume instead of only new turns |
 | `OPENCODE_MEMORY_FOREGROUND` | `0` | `1` runs maintenance in foreground |
 | `OPENCODE_MEMORY_TERMINAL_LOG` | foreground-only | `1`/`0` forces terminal logs on/off |
-| `OPENCODE_MEMORY_MODEL` / `OPENCODE_MEMORY_AGENT` | opencode default | Extraction model / agent |
+| `OPENCODE_MEMORY_MODEL` / `OPENCODE_MEMORY_AGENT` | session's own model / opencode default | Extraction model / agent. Unset, extraction reuses the session's model (warm cache, cheap) |
+| `OPENCODE_MEMORY_MATCH_SESSION_MODEL` | `1` | `0` stops matching the session's model when no extraction model is set (falls back to opencode's default model) |
 | `OPENCODE_MEMORY_RECALL_MODEL` / `OPENCODE_MEMORY_RECALL_AGENT` | default / `opencode-memory-recall` | Recall model / agent |
 | `OPENCODE_MEMORY_AUTODREAM` | `1` | `0` disables consolidation |
 | `OPENCODE_MEMORY_AUTODREAM_MIN_HOURS` / `_MIN_SESSIONS` | `24` / `5` | Consolidation gate |

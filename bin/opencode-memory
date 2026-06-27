@@ -41,7 +41,8 @@
 #   OPENCODE_MEMORY_FOREGROUND=1              — Run maintenance in foreground (debug)
 #   OPENCODE_MEMORY_TERMINAL_LOG=1|0          — Force-enable/disable terminal logs (default: foreground only)
 #   OPENCODE_MEMORY_OPENCODE_BIN=...          — Path to the opencode binary to use (e.g. a dev build); overrides PATH lookup
-#   OPENCODE_MEMORY_MODEL=...                 — Extraction model override
+#   OPENCODE_MEMORY_MODEL=...                 — Extraction model override (unset: reuse the session's own model for a warm-cache, cheap fork)
+#   OPENCODE_MEMORY_MATCH_SESSION_MODEL=0     — Don't match the session's model when no extraction model is set (use opencode's default instead)
 #   OPENCODE_MEMORY_AGENT=...                 — Extraction agent override
 #   OPENCODE_MEMORY_AUTODREAM=0               — Disable auto-dream consolidation
 #   OPENCODE_MEMORY_AUTODREAM_MIN_HOURS=24    — Min hours between auto-dream runs
@@ -818,6 +819,77 @@ finally:
 
 if row and row[0]:
     print(row[0])
+PY
+}
+
+# Resolve the model a session actually ran on, as an opencode `-m` string
+# (`<providerID>/<modelID>`). Used to keep extraction on the SAME model as the
+# session when no extraction model is configured, so the fork reuses the warm
+# prompt cache instead of prefilling the whole conversation into a different
+# model. Prefers the `session.model` column (JSON: {id, providerID, variant});
+# falls back to the most recent assistant message's modelID/providerID for older
+# sessions whose row predates that column. Prints nothing on any failure.
+get_session_model_from_db() {
+  local session_id="$1"
+  local db_path
+  db_path=$(get_opencode_db_path)
+
+  if [ -z "$session_id" ] || [ ! -f "$db_path" ] || ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+
+  python3 - "$db_path" "$session_id" <<'PY'
+import json
+import sqlite3
+import sys
+
+db_path, session_id = sys.argv[1:3]
+
+
+def as_dash_m(provider, model):
+    provider = (provider or "").strip()
+    model = (model or "").strip()
+    if not model:
+        return ""
+    return f"{provider}/{model}" if provider else model
+
+
+try:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    spec = ""
+    # 1) session.model column (preferred — it's the model the session settled on)
+    row = conn.execute("SELECT model FROM session WHERE id = ? LIMIT 1", (session_id,)).fetchone()
+    if row and row[0]:
+        try:
+            m = json.loads(row[0])
+            spec = as_dash_m(m.get("providerID"), m.get("id"))
+        except Exception:
+            spec = ""
+    # 2) fallback: most recent assistant message's provider/model
+    if not spec:
+        mrow = conn.execute(
+            "SELECT data FROM message WHERE session_id = ? "
+            "AND json_extract(data,'$.role')='assistant' "
+            "AND json_extract(data,'$.modelID') IS NOT NULL "
+            "ORDER BY time_created DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if mrow and mrow[0]:
+            try:
+                d = json.loads(mrow[0])
+                spec = as_dash_m(d.get("providerID"), d.get("modelID"))
+            except Exception:
+                spec = ""
+except Exception:
+    raise SystemExit(1)
+finally:
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+if spec:
+    print(spec)
 PY
 }
 
@@ -1869,9 +1941,19 @@ run_extraction_if_needed() {
   local parent_session_title
   parent_session_title=$(get_session_title_from_db "$session_id" || true)
 
+  # Pick the extraction model. An explicit EXTRACT_MODEL (env or config) always
+  # wins. Otherwise default to the session's OWN model so the fork hits the warm
+  # prompt cache (cheap) rather than prefilling the whole conversation into
+  # opencode's global default; disable that with OPENCODE_MEMORY_MATCH_SESSION_MODEL=0.
+  local extract_model="$EXTRACT_MODEL"
+  if [ -z "$extract_model" ] && [ "${OPENCODE_MEMORY_MATCH_SESSION_MODEL:-1}" != "0" ]; then
+    extract_model=$(get_session_model_from_db "$session_id" 2>/dev/null || true)
+    [ -n "$extract_model" ] && log "Matching session model for warm-cache extraction: $extract_model"
+  fi
+
   local cmd=("$REAL_OPENCODE" run -s "$session_id" --fork --dir "$WORKING_DIR")
-  if [ -n "$EXTRACT_MODEL" ]; then
-    cmd+=(-m "$EXTRACT_MODEL")
+  if [ -n "$extract_model" ]; then
+    cmd+=(-m "$extract_model")
   fi
   if [ -n "$EXTRACT_AGENT" ]; then
     cmd+=(--agent "$EXTRACT_AGENT")
