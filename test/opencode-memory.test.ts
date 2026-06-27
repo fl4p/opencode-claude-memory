@@ -1592,6 +1592,8 @@ exit 0
 
     const env: Record<string, string> = {
       ...process.env,
+      OPENCODE_DB: "opencode.db",
+      OPENCODE_MEMORY_OPENCODE_BIN: "",
       PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
       HOME: homeDir,
       TMPDIR: tmpDir,
@@ -1625,6 +1627,79 @@ exit 0
   test("an explicit OPENCODE_MEMORY_MODEL overrides the session-model default", () => {
     const explicit = "anthropic/claude-sonnet-4-6"
     const { forkArgs } = runSessionModel({ explicitModel: explicit })
+    expect(forkArgs).toContain(explicit)
+    expect(forkArgs).not.toContain(SESSION_MODEL_SPEC)
+  })
+
+  // --- Dream session-model matching (warm-cache dream default) ----------------
+
+  function runDreamSessionModel({ matchOff, explicitDreamModel }: { matchOff?: boolean; explicitDreamModel?: string }) {
+    const root = makeTempRoot()
+    const fakeBin = join(root, "bin")
+    const homeDir = join(root, "home")
+    const tmpDir = join(root, "tmp")
+    const claudeDir = join(root, "claude")
+    const forkArgsFile = join(root, "fork-args")
+    const sessionId = "ses_dream_model"
+
+    mkdirSync(fakeBin, { recursive: true })
+    mkdirSync(homeDir, { recursive: true })
+    mkdirSync(tmpDir, { recursive: true })
+    mkdirSync(claudeDir, { recursive: true })
+
+    seedSessionModelDb(homeDir, sessionId, root, SESSION_MODEL_JSON)
+
+    writeExecutable(
+      join(fakeBin, "opencode"),
+      `#!/usr/bin/env bash
+set -uo pipefail
+if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
+  echo '[{"id":"${sessionId}","directory":"${root}","updated":1,"created":1}]'
+  exit 0
+fi
+if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "-s" ]; then
+  printf '%s\\n' "\$@" > "${forkArgsFile}"
+  echo "⚙ memory_save test"
+  exit 0
+fi
+exit 0
+`,
+    )
+
+    const env: Record<string, string> = {
+      ...process.env,
+      OPENCODE_DB: "opencode.db",
+      OPENCODE_MEMORY_OPENCODE_BIN: "",
+      PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      HOME: homeDir,
+      TMPDIR: tmpDir,
+      CLAUDE_CONFIG_DIR: claudeDir,
+      OPENCODE_MEMORY_SESSION_WAIT_SECONDS: "1",
+    }
+    if (matchOff) env.OPENCODE_MEMORY_MATCH_SESSION_MODEL = "0"
+    if (explicitDreamModel) env.OPENCODE_MEMORY_AUTODREAM_MODEL = explicitDreamModel
+
+    const result = spawnSync("bash", [scriptPath, "dream", "--dir", root], { cwd: root, encoding: "utf-8", env })
+    expect(result.status).toBe(0)
+    const forkArgs = existsSync(forkArgsFile) ? readFileSync(forkArgsFile, "utf-8") : ""
+    return { forkArgs, forkArgLines: forkArgs.split("\n") }
+  }
+
+  test("dream defaults to the session's own model (warm-cache) when no dreamModel is set", () => {
+    const { forkArgs, forkArgLines } = runDreamSessionModel({})
+    expect(forkArgLines).toContain("-m")
+    expect(forkArgs).toContain(SESSION_MODEL_SPEC)
+  })
+
+  test("OPENCODE_MEMORY_MATCH_SESSION_MODEL=0 disables session-model matching for dream (no -m flag)", () => {
+    const { forkArgs, forkArgLines } = runDreamSessionModel({ matchOff: true })
+    expect(forkArgLines).not.toContain("-m")
+    expect(forkArgs).not.toContain(SESSION_MODEL_SPEC)
+  })
+
+  test("an explicit OPENCODE_MEMORY_AUTODREAM_MODEL overrides the session-model default for dream", () => {
+    const explicit = "anthropic/claude-sonnet-4-6"
+    const { forkArgs } = runDreamSessionModel({ explicitDreamModel: explicit })
     expect(forkArgs).toContain(explicit)
     expect(forkArgs).not.toContain(SESSION_MODEL_SPEC)
   })
@@ -1670,6 +1745,8 @@ exit 0
 
     const env: Record<string, string> = {
       ...process.env,
+      OPENCODE_DB: "opencode.db",
+      OPENCODE_MEMORY_OPENCODE_BIN: "",
       PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
       HOME: homeDir,
       TMPDIR: tmpDir,

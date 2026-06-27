@@ -60,7 +60,8 @@
 # dreamModel/dreamAgent (recallModel/recallAgent are read in-process by the plugin).
 # The in-repo memory switch is likewise read in-process by the plugin (env var
 # OPENCODE_MEMORY_LOCAL or opencode.json options.localMemory).
-# Precedence: env var > opencode.json options > default (dream falls back to extract).
+# Precedence: env var > opencode.json options > default (dream falls back to extract;
+# both fall back to the session's own model for warm-cache benefit when unset).
 #
 
 set -euo pipefail
@@ -2052,8 +2053,15 @@ run_autodream_if_needed() {
   parent_session_title=$(get_session_title_from_db "$session_id" || true)
 
   local cmd=("$REAL_OPENCODE" run -s "$session_id" --fork --dir "$WORKING_DIR")
-  if [ -n "$AUTODREAM_MODEL" ]; then
-    cmd+=(-m "$AUTODREAM_MODEL")
+  # Fall back to the session's own model for warm-cache benefit (same
+  # rationale as extraction) when no explicit dream model is set.
+  local dream_model="$AUTODREAM_MODEL"
+  if [ -z "$dream_model" ] && [ "${OPENCODE_MEMORY_MATCH_SESSION_MODEL:-1}" != "0" ]; then
+    dream_model=$(get_session_model_from_db "$session_id" 2>/dev/null || true)
+    [ -n "$dream_model" ] && log "Matching session model for warm-cache dream: $dream_model"
+  fi
+  if [ -n "$dream_model" ]; then
+    cmd+=(-m "$dream_model")
   fi
   if [ -n "$AUTODREAM_AGENT" ]; then
     cmd+=(--agent "$AUTODREAM_AGENT")
@@ -2215,7 +2223,14 @@ run_dream_forced() {
   local parent_session_title
   parent_session_title=$(get_session_title_from_db "$session_id" || true)
   local cmd=("$REAL_OPENCODE" run -s "$session_id" --fork --dir "$WORKING_DIR")
-  [ -n "$AUTODREAM_MODEL" ] && cmd+=(-m "$AUTODREAM_MODEL")
+  # Fall back to the session's own model for warm-cache benefit (same
+  # rationale as extraction) when no explicit dream model is set.
+  local dream_model="$AUTODREAM_MODEL"
+  if [ -z "$dream_model" ] && [ "${OPENCODE_MEMORY_MATCH_SESSION_MODEL:-1}" != "0" ]; then
+    dream_model=$(get_session_model_from_db "$session_id" 2>/dev/null || true)
+    [ -n "$dream_model" ] && log "Matching session model for warm-cache dream: $dream_model"
+  fi
+  [ -n "$dream_model" ] && cmd+=(-m "$dream_model")
   [ -n "$AUTODREAM_AGENT" ] && cmd+=(--agent "$AUTODREAM_AGENT")
   cmd+=("$AUTODREAM_PROMPT")
   local fork_started_at_ms
