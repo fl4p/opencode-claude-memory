@@ -47,7 +47,12 @@ Uninstall with `opencode-memory uninstall` then `npm uninstall -g opencode-claud
 
 ### During a session
 
-The plugin injects the memory prompt and surfaces relevant memories via LLM recall.
+The plugin injects the memory prompt (the `memory_*` tool instructions plus the `MEMORY.md`
+index) and, on each user turn, surfaces the memories relevant to that message via **LLM
+recall**: a small, fast model (the configurable `recallModel`) reads your message and each
+memory's one-line description and picks which to inject (up to 5). It's an LLM relevance
+judgment rather than keyword or embedding search, and it runs as a non-blocking prefetch so
+it doesn't add turn latency.
 
 ### After a session
 
