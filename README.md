@@ -78,6 +78,11 @@ same `OPENCODE_MEMORY_*` model/bin settings. `opencode-memory dream [--dir DIR]`
 single consolidation pass (collapse duplicates, prune stale/invalidated) over `DIR`'s live
 memory store, bypassing the auto-dream gate.
 
+Every consolidation pass (auto or forced) appends one audit line to a persistent **dream
+journal** at `$STATE_DIR/dream-journal.log` — timestamp, mode, ok/fail, delete/save counts,
+model, host session, and dir — so `tail` answers "did a dream already run on this store, and
+what did it change?" without digging through the ephemeral per-run logs in `$TMPDIR`.
+
 **Idle-triggered maintain (no wrapper, no hook).** Instead of wiring `maintain` externally,
 the plugin itself can fire it: set `OPENCODE_MEMORY_MAINTAIN_ON_IDLE=1` (or `maintainOnIdle:
 true`) and it subscribes to opencode's `session.idle` event and spawns `opencode-memory

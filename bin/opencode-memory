@@ -503,6 +503,12 @@ TASK_LOG_PREFIX="$(date +%Y%m%d-%H%M%S)-${PROJECT_KEY}"
 EXTRACT_LOG_FILE="$LOG_DIR/extract-${TASK_LOG_PREFIX}.log"
 AUTODREAM_LOG_FILE="$LOG_DIR/dream-${TASK_LOG_PREFIX}.log"
 
+# Persistent dream journal: one audit line per consolidation pass, appended to a
+# durable file (the per-run dream logs above live in TMP and are easy to lose).
+# Answers "did a dream already run on this store, and what did it change?" at a
+# glance — `tail "$DREAM_JOURNAL_FILE"`.
+DREAM_JOURNAL_FILE="$STATE_DIR/dream-journal.log"
+
 # ============================================================================
 # Prompts
 # ============================================================================
@@ -2060,10 +2066,12 @@ run_autodream_if_needed() {
   if "${cmd[@]}" >> "$AUTODREAM_LOG_FILE" 2>&1; then
     log "Auto-dream consolidation completed successfully"
     # Keep lock mtime at "now" to represent last consolidated timestamp.
+    append_dream_journal "auto-dream" "ok" "$session_id"
   else
     local code=$?
     log "Auto-dream consolidation failed (exit code $code). Rolling back gate timestamp"
     rollback_consolidation_lock "$CONSOLIDATION_PRIOR_MTIME"
+    append_dream_journal "auto-dream" "fail" "$session_id"
   fi
 
   cleanup_forked_sessions "$fork_started_at_ms" "$parent_session_title"
@@ -2153,6 +2161,24 @@ run_maintain() {
   run_post_session_tasks "$session_id" 0
 }
 
+append_dream_journal() {
+  # Append one audit line per consolidation pass. Best-effort: never fails the
+  # dream. $1=mode (dream|auto-dream), $2=status (ok|fail), $3=host session id.
+  # Delete/save counts come from the tool-call lines in this run's dream log
+  # (rendered as "⚙ memory_delete <name>"); the gear anchor avoids counting the
+  # prompt's own mentions of the tool names.
+  local mode="$1" status="$2" session_id="$3"
+  local deletes saves ts
+  deletes=$(grep -ac '⚙.*memory_delete' "$AUTODREAM_LOG_FILE" 2>/dev/null || true); deletes=${deletes:-0}
+  saves=$(grep -ac '⚙.*memory_save' "$AUTODREAM_LOG_FILE" 2>/dev/null || true); saves=${saves:-0}
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  printf '%s  %-10s  %-4s  del=%-3s save=%-3s  model=%s  host=%s  dir=%s\n' \
+    "$ts" "$mode" "$status" "$deletes" "$saves" \
+    "${AUTODREAM_MODEL:-<opencode-default>}" "${session_id:-?}" "$WORKING_DIR" \
+    >> "$DREAM_JOURNAL_FILE" 2>/dev/null || true
+}
+
 run_dream_forced() {
   # One consolidation pass over WORKING_DIR's live memory store, bypassing the
   # auto-dream time/session gate. Forks a session purely to host the dream agent
@@ -2196,9 +2222,11 @@ run_dream_forced() {
   fork_started_at_ms=$(( $(date +%s) * 1000 ))
   if "${cmd[@]}" >> "$AUTODREAM_LOG_FILE" 2>&1; then
     log "dream: consolidation completed"
+    append_dream_journal "dream" "ok" "$session_id"
   else
     local code=$?
     log "dream: consolidation failed (exit code $code). Check $AUTODREAM_LOG_FILE"
+    append_dream_journal "dream" "fail" "$session_id"
   fi
   cleanup_forked_sessions "$fork_started_at_ms" "$parent_session_title"
   release_simple_lock "$MEMORY_LOCK_FILE"
