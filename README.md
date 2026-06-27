@@ -78,6 +78,17 @@ same `OPENCODE_MEMORY_*` model/bin settings. `opencode-memory dream [--dir DIR]`
 single consolidation pass (collapse duplicates, prune stale/invalidated) over `DIR`'s live
 memory store, bypassing the auto-dream gate.
 
+**Idle-triggered maintain (no wrapper, no hook).** Instead of wiring `maintain` externally,
+the plugin itself can fire it: set `OPENCODE_MEMORY_MAINTAIN_ON_IDLE=1` (or `maintainOnIdle:
+true`) and it subscribes to opencode's `session.idle` event and spawns `opencode-memory
+maintain --dir <cwd>` once the session goes quiet. This works for **any** launch — dashboard
+tile, bare CLI, editor — with no shell hook and no per-launcher config. It is **off by
+default** so that running opencode *through* the wrapper doesn't extract twice. A new turn
+cancels the pending run, so maintain fires once per quiet period rather than every turn (the
+incremental high-water mark makes any overlap a cheap near-noop); tune the debounce with
+`OPENCODE_MEMORY_MAINTAIN_IDLE_SECONDS` (default 30). It spawns the wrapper detached, so it
+never adds turn latency.
+
 ### Incremental extraction
 
 Extraction is incremental: it records how many user turns a session had when it was last
@@ -145,6 +156,8 @@ Each setting is an env var or an `opencode.json` option. Precedence: env var, th
 | `OPENCODE_MEMORY_AUTODREAM` | `1` | `0` disables consolidation |
 | `OPENCODE_MEMORY_AUTODREAM_MIN_HOURS` / `_MIN_SESSIONS` | `24` / `5` | Consolidation gate |
 | `OPENCODE_MEMORY_AUTODREAM_MODEL` / `_AGENT` | extraction model / agent | Consolidation model / agent |
+| `OPENCODE_MEMORY_MAINTAIN_ON_IDLE` | `0` | `1` makes the plugin spawn `maintain` on `session.idle` (extraction without the wrapper or a hook) |
+| `OPENCODE_MEMORY_MAINTAIN_IDLE_SECONDS` | `30` | Debounce: quiet seconds after idle before idle-maintain fires |
 | `OPENCODE_MEMORY_LOCAL` | `auto` | In-repo memory: `on` / `off` / `auto` |
 | `OPENCODE_MEMORY_LOCAL_SECRETS` | `off` | `on` allows secrets in in-repo memory |
 | `OPENCODE_MEMORY_REDACT_GLOBAL` | `off` | `on` also scrubs credential values from global writes (opt-in defense-in-depth) |
@@ -163,6 +176,7 @@ tuple entry:
       "localMemory":  "auto",                   // on | off | auto
       "localMemorySecrets": false,
       "redactGlobalSecrets": false,             // opt-in: scrub global writes too
+      "maintainOnIdle": false,                  // opt-in: run maintain on session.idle
       "indexMaxLines": 160,
       "extraMemoryRoots": ["/abs/path/to/other-repo"]
     }]
