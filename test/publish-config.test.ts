@@ -28,7 +28,8 @@ describe("package publish config", () => {
         default: "./dist/index.js",
       },
     })
-    expect(pkg.files).toEqual(["dist"])
+    // bin/ ships alongside dist so a GitHub install can self-build the wrapper.
+    expect(pkg.files).toEqual(["dist", "bin"])
     expect(pkg.scripts?.build).toBe("tsc -p tsconfig.json")
     expect(pkg.scripts?.prepack).toBe("npm run build")
   })

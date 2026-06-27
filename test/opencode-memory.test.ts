@@ -1528,4 +1528,174 @@ exit 0
     expect(forkArgs).not.toContain("INCREMENTAL EXTRACTION")
     expect(markValue).toBe("5") // pre-existing mark left as-is; disabled => not advanced
   })
+
+  // --- Session-model matching (warm-cache extraction default) -----------------
+
+  // session.model JSON shape opencode stores; resolver -> "<providerID>/<id>".
+  const SESSION_MODEL_JSON = '{"id":"accounts/fireworks/models/glm-5p2","providerID":"fireworks-ai","variant":"default"}'
+  const SESSION_MODEL_SPEC = "fireworks-ai/accounts/fireworks/models/glm-5p2"
+
+  function seedSessionModelDb(homeDir: string, sessionId: string, directory: string, model: string | null): void {
+    const dbDir = join(homeDir, ".local", "share", "opencode")
+    mkdirSync(dbDir, { recursive: true })
+    const db = new Database(join(dbDir, "opencode.db"))
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS session (
+        id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, title TEXT NOT NULL,
+        time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_archived INTEGER, model TEXT
+      )`,
+    )
+    db.query(
+      "INSERT OR REPLACE INTO session (id,parent_id,directory,title,time_created,time_updated,time_archived,model) VALUES (?,?,?,?,?,?,?,?)",
+    ).run(sessionId, null, directory, "t", 1, 1, null, model)
+    db.close()
+  }
+
+  function runSessionModel({ matchOff, explicitModel }: { matchOff?: boolean; explicitModel?: string }) {
+    const root = makeTempRoot()
+    const fakeBin = join(root, "bin")
+    const homeDir = join(root, "home")
+    const tmpDir = join(root, "tmp")
+    const claudeDir = join(root, "claude")
+    const forkArgsFile = join(root, "fork-args")
+    const sessionId = "ses_inc"
+
+    mkdirSync(fakeBin, { recursive: true })
+    mkdirSync(homeDir, { recursive: true })
+    mkdirSync(tmpDir, { recursive: true })
+    mkdirSync(claudeDir, { recursive: true })
+
+    seedSessionModelDb(homeDir, sessionId, root, SESSION_MODEL_JSON)
+
+    writeExecutable(
+      join(fakeBin, "opencode"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
+  echo '[{"id":"${sessionId}","directory":"${root}","updated":1,"created":1}]'
+  exit 0
+fi
+if [ "\${1:-}" = "export" ]; then echo '{"info":{"directory":"${root}"}}'; exit 0; fi
+if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "-s" ]; then
+  printf '%s\\n' "\$@" > "${forkArgsFile}"
+  exit 0
+fi
+if [ "\${1:-}" = "run" ]; then
+  mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
+  printf '{"type":"user","content":"u0"}\\n{"type":"user","content":"u1"}\\n{"type":"assistant","content":"a"}\\n' > "$CLAUDE_CONFIG_DIR/transcripts/${sessionId}.jsonl"
+  echo "main run ok"
+  exit 0
+fi
+exit 0
+`,
+    )
+
+    const env: Record<string, string> = {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      HOME: homeDir,
+      TMPDIR: tmpDir,
+      CLAUDE_CONFIG_DIR: claudeDir,
+      OPENCODE_MEMORY_SESSION_WAIT_SECONDS: "1",
+      OPENCODE_MEMORY_FOREGROUND: "1",
+      OPENCODE_MEMORY_AUTODREAM: "0",
+      OPENCODE_MEMORY_PROVENANCE: "0",
+    }
+    if (matchOff) env.OPENCODE_MEMORY_MATCH_SESSION_MODEL = "0"
+    if (explicitModel) env.OPENCODE_MEMORY_MODEL = explicitModel
+
+    const result = spawnSync("bash", [scriptPath, "run", "hello"], { cwd: root, encoding: "utf-8", env })
+    expect(result.status).toBe(0)
+    const forkArgs = existsSync(forkArgsFile) ? readFileSync(forkArgsFile, "utf-8") : ""
+    return { forkArgs, forkArgLines: forkArgs.split("\n") }
+  }
+
+  test("extraction defaults to the session's own model (warm-cache) when no extractModel is set", () => {
+    const { forkArgs, forkArgLines } = runSessionModel({})
+    expect(forkArgLines).toContain("-m")
+    expect(forkArgs).toContain(SESSION_MODEL_SPEC)
+  })
+
+  test("OPENCODE_MEMORY_MATCH_SESSION_MODEL=0 disables session-model matching (no -m flag)", () => {
+    const { forkArgs, forkArgLines } = runSessionModel({ matchOff: true })
+    expect(forkArgLines).not.toContain("-m")
+    expect(forkArgs).not.toContain(SESSION_MODEL_SPEC)
+  })
+
+  test("an explicit OPENCODE_MEMORY_MODEL overrides the session-model default", () => {
+    const explicit = "anthropic/claude-sonnet-4-6"
+    const { forkArgs } = runSessionModel({ explicitModel: explicit })
+    expect(forkArgs).toContain(explicit)
+    expect(forkArgs).not.toContain(SESSION_MODEL_SPEC)
+  })
+
+  // --- Dream journal (audit trail of consolidation passes) --------------------
+
+  function runDreamJournal({ deletes, saves, forkFails }: { deletes: number; saves: number; forkFails?: boolean }) {
+    const root = makeTempRoot()
+    const fakeBin = join(root, "bin")
+    const homeDir = join(root, "home")
+    const tmpDir = join(root, "tmp")
+    const claudeDir = join(root, "claude")
+    const sessionId = "ses_dream"
+
+    mkdirSync(fakeBin, { recursive: true })
+    mkdirSync(homeDir, { recursive: true })
+    mkdirSync(tmpDir, { recursive: true })
+    mkdirSync(claudeDir, { recursive: true })
+
+    seedSessionModelDb(homeDir, sessionId, root, null)
+
+    // The dream fork renders tool calls as "⚙ memory_delete <name>" lines; the
+    // journal counts them (gear-anchored). Emit the requested counts.
+    const delLines = Array.from({ length: deletes }, (_, i) => `  echo "⚙ memory_delete d${i}"`).join("\n")
+    const saveLines = Array.from({ length: saves }, (_, i) => `  echo "⚙ memory_save s${i}"`).join("\n")
+
+    writeExecutable(
+      join(fakeBin, "opencode"),
+      `#!/usr/bin/env bash
+set -uo pipefail
+if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
+  echo '[{"id":"${sessionId}","directory":"${root}","updated":1,"created":1}]'
+  exit 0
+fi
+if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "-s" ]; then
+${delLines}
+${saveLines}
+  ${forkFails ? "exit 1" : "exit 0"}
+fi
+exit 0
+`,
+    )
+
+    const env: Record<string, string> = {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      HOME: homeDir,
+      TMPDIR: tmpDir,
+      CLAUDE_CONFIG_DIR: claudeDir,
+      OPENCODE_MEMORY_SESSION_WAIT_SECONDS: "1",
+    }
+
+    const result = spawnSync("bash", [scriptPath, "dream", "--dir", root], { cwd: root, encoding: "utf-8", env })
+    expect(result.status).toBe(0)
+    const journalPath = join(claudeDir, "opencode-memory", "dream-journal.log")
+    const journal = existsSync(journalPath) ? readFileSync(journalPath, "utf-8").trim() : ""
+    return { journal, root }
+  }
+
+  test("dream writes a journal line with delete/save counts and the dir", () => {
+    const { journal, root } = runDreamJournal({ deletes: 2, saves: 1 })
+    expect(journal).toContain("dream")
+    expect(journal).toContain("ok")
+    expect(journal).toContain("del=2")
+    expect(journal).toContain("save=1")
+    expect(journal).toContain(`dir=${root}`)
+  })
+
+  test("a failed dream is recorded in the journal as fail", () => {
+    const { journal } = runDreamJournal({ deletes: 0, saves: 0, forkFails: true })
+    expect(journal).toContain("dream")
+    expect(journal).toContain("fail")
+  })
 })
