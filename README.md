@@ -1,6 +1,6 @@
 # opencode-claude-memory
 
-Claude Code-compatible persistent memory for OpenCode. Both tools read and write the same
+Claude Code-compatible persistent memory for OpenCode. Both agents read and write the same
 Markdown memory files, so they share one project context.
 
 A fork of [kuitos/opencode-claude-memory](https://github.com/kuitos/opencode-claude-memory),
@@ -9,13 +9,18 @@ keeping the upstream store and format and adding the items below. Design notes a
 
 ## What this fork adds
 
-- **Two-phase extraction** — Phase 1 captures harness feedback (kept out of recall),
-  Phase 2 captures durable memory. Extraction/dream/recall models are configurable;
-  default is GLM-4.6 (`opencode/big-pickle`).
+- **Post-session memory extraction** — after a session it mines the transcript for durable
+  memories. Extraction/dream/recall models are configurable; default is GLM-4.6
+  (`opencode/big-pickle`).
+- **Dream consolidation** — a periodic pass collapses duplicate memories and prunes stale or
+  invalidated ones, keeping the store small and current.
 - **In-repo memory** — store memory at `<repo>/.claude/memory/` instead of the global
   `~/.claude` store, so it can be committed. Same path Claude Code uses, so they still share.
 - **Secret scrubbing for in-repo memory** — in-repo writes have credential values scrubbed
   by default (the global store is left alone). Opt out with `localMemorySecrets`.
+- **Harness-feedback sidecar** — observations about how the agent and tools behaved are
+  captured to a separate global sidecar and kept out of recall (and out of any committable
+  in-repo store).
 - **Index size-limit warning** — when `MEMORY.md` gets large, the agent offers to compact it.
 - **Cross-repo memory** — surface other repos' memory read-only via `extraMemoryRoots`.
 
@@ -39,19 +44,29 @@ Uninstall with `opencode-memory uninstall` then `npm uninstall -g opencode-claud
 
 ## How it works
 
-The shell hook wraps `opencode`. After each session it forks the session to extract memory
-(if none was written), then runs a consolidation pass if the auto-dream gate passes (by
-default 24h since the last run and 5 touched sessions). Maintenance runs in the background
-unless `OPENCODE_MEMORY_FOREGROUND=1`. During a session the plugin injects the memory
-prompt and surfaces relevant memories via LLM recall.
+### During a session
 
-When opencode is launched directly (not through the hook) — e.g. a dashboard tile or an
-editor integration — the post-session step never runs. For those cases,
-`opencode-memory maintain [--dir DIR]` runs extraction + the auto-dream gate on the latest
-session for `DIR` without starting an interactive opencode, so it can be wired to a cron job
-or an on-close hook. It honours the same `OPENCODE_MEMORY_*` model/bin settings.
-`opencode-memory dream [--dir DIR]` runs a single consolidation pass (collapse duplicates,
-prune stale/invalidated) over `DIR`'s live memory store, bypassing the auto-dream gate.
+The plugin injects the memory prompt and surfaces relevant memories via LLM recall.
+
+### After a session
+
+The shell hook wraps `opencode`. After each session it forks the session to extract memory
+(if none was written) — forking reuses the already-loaded conversation context (warm cache)
+rather than re-feeding a transcript to a fresh model. It then runs a consolidation pass if
+the auto-dream gate passes (by default 24h since the last run and 5 touched sessions).
+Maintenance runs in the background unless `OPENCODE_MEMORY_FOREGROUND=1`.
+
+### When opencode isn't wrapped
+
+When opencode is launched directly (not through the hook) — e.g. an editor integration — the
+post-session step never runs. For those cases, `opencode-memory maintain [--dir DIR]` runs
+extraction + the auto-dream gate on the latest session for `DIR` without starting an
+interactive opencode, so you can wire it to a cron job or an on-close hook. It honours the
+same `OPENCODE_MEMORY_*` model/bin settings. `opencode-memory dream [--dir DIR]` runs a
+single consolidation pass (collapse duplicates, prune stale/invalidated) over `DIR`'s live
+memory store, bypassing the auto-dream gate.
+
+### Incremental extraction
 
 Extraction is incremental: it records how many user turns a session had when it was last
 extracted, so resuming a session re-mines only the new turns (and skips entirely when
@@ -89,11 +104,11 @@ guarantee — review before pushing. Disable with `OPENCODE_MEMORY_LOCAL_SECRETS
 can opt the same scrub onto global writes with `OPENCODE_MEMORY_REDACT_GLOBAL` /
 `redactGlobalSecrets`. The scrub is keyword-anchored and best-effort, not a guarantee.
 
-**Harness feedback stays global.** The post-session Phase 1 (harness feedback —
-observations about how the agent/tools behaved) is always written to the global
-`~/.claude/.../harness-feedback.md` sidecar, even in in-repo mode. It is developer
-feedback, not curated project memory, so it is deliberately kept out of a committable
-`.claude/memory`. Only the Phase 2 durable memories follow the in-repo switch.
+**Harness feedback stays global.** The harness-feedback sidecar (observations about how the
+agent and tools behaved) is always written to the global `~/.claude/.../harness-feedback.md`
+sidecar, even in in-repo mode. It is developer feedback, not curated project memory, so it is
+deliberately kept out of a committable `.claude/memory`. Only the durable memories follow the
+in-repo switch.
 
 In-repo mode and `extraMemoryRoots` are independent: the `on`/`off`/`auto` switch governs
 only the session's own repo. Repos surfaced via `extraMemoryRoots` are always read with
