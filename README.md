@@ -78,6 +78,18 @@ same `OPENCODE_MEMORY_*` model/bin settings. `opencode-memory dream [--dir DIR]`
 single consolidation pass (collapse duplicates, prune stale/invalidated) over `DIR`'s live
 memory store, bypassing the auto-dream gate.
 
+### Fork cleanup
+
+Extraction and dream both work by forking the session (`opencode run --fork`), which creates a
+throwaway `<title> (fork #N)` session. Each run deletes its own fork afterward, identified by
+snapshotting session ids immediately before the fork and deleting the new one that appears —
+this is exact even when several of your sessions share a title (a title-plus-time-window match
+is not, and older versions leaked forks into `opencode session list` whenever titles collided).
+If leftover forks accumulated under an older version, `opencode-memory purge-forks [--dir DIR]`
+lists them (dry run); add `--yes` to delete, `--all` to sweep every directory instead of just
+the current repo. Only forks carrying this tool's signature (its extraction/dream prompt, or a
+`memory_*`/`harness_feedback` tool call) are removed — sessions you forked by hand are kept.
+
 Every consolidation pass (auto or forced) appends one audit line to a persistent **dream
 journal** at `$STATE_DIR/dream-journal.log` — timestamp, mode, ok/fail, delete/save counts,
 model, host session, and dir — so `tail` answers "did a dream already run on this store, and

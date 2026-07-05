@@ -34,6 +34,12 @@
 #   dream [--dir DIR]              — one consolidation pass over DIR's live memory
 #                                    store (collapse duplicates, prune stale),
 #                                    bypassing the auto-dream gate. No extraction.
+#   purge-forks [--dir DIR]        — delete leaked post-session extraction/dream
+#     [--all] [--yes]                fork sessions that clutter `opencode session
+#                                    list`. Only forks bearing this tool's
+#                                    signature (its prompt / a memory_* tool call)
+#                                    are removed; hand-made forks are kept. Dry-run
+#                                    unless --yes. --all ignores the repo scope.
 #
 # Environment variables:
 #   OPENCODE_MEMORY_EXTRACT=0                 — Disable post-session extraction
@@ -243,6 +249,29 @@ case "${1:-}" in
       case "$1" in
         --dir) OPENCODE_MEMORY_DIR="${2:-}"; shift 2 || shift ;;
         --dir=*) OPENCODE_MEMORY_DIR="${1#--dir=}"; shift ;;
+        *) shift ;;
+      esac
+    done
+    [ -n "${OPENCODE_MEMORY_DIR:-}" ] && export OPENCODE_MEMORY_DIR
+    set --
+    ;;
+  purge-forks)
+    # Sweep leaked post-session extraction/dream fork sessions out of `opencode
+    # session list` (they clutter the session picker). Only sessions whose title
+    # is "<parent> (fork #N)" AND whose transcript carries this tool's extraction/
+    # dream signature (its prompt text, or a memory_*/harness_feedback tool call)
+    # are eligible — a session you forked by hand is never touched. Dry-run unless
+    # --yes is given. Scope: --dir DIR (default: pwd's repo); --all every dir.
+    PURGE_FORKS_MODE=1
+    PURGE_FORKS_ALL=0
+    PURGE_FORKS_CONFIRM=0
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --dir) OPENCODE_MEMORY_DIR="${2:-}"; shift 2 || shift ;;
+        --dir=*) OPENCODE_MEMORY_DIR="${1#--dir=}"; shift ;;
+        --all) PURGE_FORKS_ALL=1; shift ;;
+        --yes|--delete|-y) PURGE_FORKS_CONFIRM=1; shift ;;
         *) shift ;;
       esac
     done
@@ -1422,28 +1451,72 @@ wait_for_session_target_id() {
   wait_for_scoped_session_id_since "$before_json" "$started_at_ms" "$TIMESTAMP_FILE" "$wait_seconds"
 }
 
-get_fork_cleanup_candidate_id() {
-  local started_at_ms="$1"
+# Snapshot every current session id (one per line) to $1, straight from the DB.
+# Taken immediately before a `run --fork` so cleanup can identify THIS run's fork
+# by id-diff (a session present after but not before). That is robust where the
+# old (title + open-ended time window + "exactly one match") heuristic was not:
+# opencode's fork sessions carry NO parent_id and identical session titles are
+# common (repeated "Review X", benchmark reruns, channel test sessions). When two
+# same-titled forks fell in the window the count guard silently deleted NEITHER,
+# so extraction/dream forks leaked into `/sessions` forever. The id-diff can only
+# ever match sessions born during this locked run, so duplicate titles no longer
+# suppress the delete or risk deleting the wrong session.
+snapshot_session_ids() {
+  local out_file="$1"
+  local db_path
+  db_path=$(get_opencode_db_path)
+
+  : > "$out_file"
+  [ -f "$db_path" ] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+
+  python3 - "$db_path" <<'PY' > "$out_file" 2>/dev/null || true
+import sqlite3, sys
+db = sys.argv[1]
+try:
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    for (sid,) in con.execute("SELECT id FROM session"):
+        if sid:
+            print(sid)
+    con.close()
+except Exception:
+    pass
+PY
+}
+
+# IDs of the fork session(s) THIS run just created: un-archived, in scope, titled
+# "<parent> (fork #N)", and absent from the pre-fork snapshot. Prints every match
+# (normally exactly one) — there is deliberately no count guard, so a duplicate-
+# titled sibling from another session can neither hide our fork nor be mistaken
+# for it (the snapshot restricts the result to ids born during this run).
+get_new_fork_session_ids() {
+  local before_file="$1"
   local parent_title="$2"
   local workdir="$3"
   local project_dir="$4"
   local db_path
   db_path=$(get_opencode_db_path)
 
-  if [ -z "$started_at_ms" ] || [ -z "$parent_title" ] || [ ! -f "$db_path" ] || ! command -v python3 >/dev/null 2>&1; then
+  if [ ! -f "$before_file" ] || [ ! -f "$db_path" ] || ! command -v python3 >/dev/null 2>&1; then
     return 1
   fi
 
-  python3 - "$db_path" "$started_at_ms" "$parent_title" "$workdir" "$project_dir" <<'PY'
+  python3 - "$db_path" "$before_file" "$parent_title" "$workdir" "$project_dir" <<'PY'
 import os
 import re
 import sqlite3
 import sys
 
-db_path, started_at_ms_raw, parent_title, workdir, project_dir = sys.argv[1:6]
-started_at_ms = int(started_at_ms_raw or "0")
+db_path, before_file, parent_title, workdir, project_dir = sys.argv[1:6]
 SCOPE_ROOT = os.path.realpath(project_dir) if project_dir else ""
 WORKDIR = os.path.realpath(workdir) if workdir else ""
+
+try:
+    with open(before_file, encoding="utf-8") as f:
+        before = {ln.strip() for ln in f if ln.strip()}
+except OSError:
+    before = set()
+
 def _git_root(d):
     cur = os.path.realpath(d)
     while True:
@@ -1453,6 +1526,7 @@ def _git_root(d):
         if parent == cur:
             return None
         cur = parent
+
 def in_scope(d):
     if not d:
         return False
@@ -1463,13 +1537,19 @@ def in_scope(d):
         gr = _git_root(rd)
         return gr is None or gr == SCOPE_ROOT
     return False
-title_pattern = re.compile(rf"^{re.escape(parent_title)} \(fork #\d+\)$")
+
+# Exact "<parent> (fork #N)" when the parent title is known; otherwise any
+# "(fork #N)" suffix. The id-diff already limits us to this run's creations, so
+# the generic fallback stays safe even if opencode refined the fork's title.
+if parent_title:
+    pattern = re.compile(rf"^{re.escape(parent_title)} \(fork #\d+\)$")
+else:
+    pattern = re.compile(r" \(fork #\d+\)$")
 
 try:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     rows = conn.execute(
-        "SELECT id, title, directory, time_created FROM session WHERE time_created >= ? ORDER BY time_created DESC",
-        (started_at_ms,),
+        "SELECT id, title, directory FROM session WHERE time_archived IS NULL"
     ).fetchall()
 except Exception:
     raise SystemExit(1)
@@ -1479,32 +1559,30 @@ finally:
     except Exception:
         pass
 
-matches = []
-for session_id, title, directory, time_created in rows:
-    if not session_id or not title or not directory or not time_created:
+for session_id, title, directory in rows:
+    if not session_id or not title or not directory:
+        continue
+    if session_id in before:
+        continue
+    if not pattern.match(title):
         continue
     if not in_scope(directory):
         continue
-    if not title_pattern.match(title):
-        continue
-    matches.append(session_id)
-
-if len(matches) == 1:
-    print(matches[0])
+    print(session_id)
 PY
 }
 
-wait_for_fork_cleanup_candidate_id() {
-  local started_at_ms="$1"
+wait_for_new_fork_session_ids() {
+  local before_file="$1"
   local parent_title="$2"
   local wait_seconds="${3:-5}"
   local attempt=0
-  local session_id=""
+  local ids=""
 
   while [ "$attempt" -lt "$wait_seconds" ]; do
-    session_id=$(get_fork_cleanup_candidate_id "$started_at_ms" "$parent_title" "$WORKING_DIR" "$PROJECT_SCOPE_DIR" || true)
-    if [ -n "$session_id" ]; then
-      printf '%s\n' "$session_id"
+    ids=$(get_new_fork_session_ids "$before_file" "$parent_title" "$WORKING_DIR" "$PROJECT_SCOPE_DIR" || true)
+    if [ -n "$ids" ]; then
+      printf '%s\n' "$ids"
       return 0
     fi
     sleep 1
@@ -1653,32 +1731,28 @@ rollback_consolidation_lock() {
 }
 
 cleanup_forked_sessions() {
-  local started_at_ms="$1"
+  local before_file="$1"
   local parent_title="$2"
 
-  if [ -z "$started_at_ms" ] || [ -z "$parent_title" ]; then
+  # An empty/absent snapshot means we cannot tell our fork from pre-existing
+  # ones — skip rather than risk deleting a real session. A healthy snapshot
+  # lists every session id, so it is only empty when the DB/python read failed.
+  if [ ! -s "$before_file" ] || ! command -v python3 >/dev/null 2>&1; then
     return 0
   fi
 
-  if ! command -v python3 >/dev/null 2>&1; then
-    return 0
-  fi
+  local ids
+  ids=$(wait_for_new_fork_session_ids "$before_file" "$parent_title" "$SESSION_WAIT_SECONDS" || true)
 
-  if ! python3 - <<'PY' >/dev/null 2>&1
-pass
-PY
-  then
-    return 0
-  fi
+  [ -n "$ids" ] || return 0
 
   local fork_id
-  fork_id=$(wait_for_fork_cleanup_candidate_id "$started_at_ms" "$parent_title" "$SESSION_WAIT_SECONDS" || true)
-
-  [ -n "$fork_id" ] || return 0
-
-  if "$REAL_OPENCODE" session delete "$fork_id" >/dev/null 2>&1; then
-    log "Cleaned up forked session $fork_id"
-  fi
+  while IFS= read -r fork_id; do
+    [ -n "$fork_id" ] || continue
+    if "$REAL_OPENCODE" session delete "$fork_id" >/dev/null 2>&1; then
+      log "Cleaned up forked session $fork_id"
+    fi
+  done <<< "$ids"
 }
 
 session_has_conversation() {
@@ -1985,8 +2059,9 @@ run_extraction_if_needed() {
   fi
   cmd+=("$full_prompt")
 
-  local fork_started_at_ms
-  fork_started_at_ms=$(( $(date +%s) * 1000 ))
+  local fork_before_ids
+  fork_before_ids=$(mktemp)
+  snapshot_session_ids "$fork_before_ids"
 
   if "${cmd[@]}" >> "$EXTRACT_LOG_FILE" 2>&1; then
     log "Memory extraction completed successfully"
@@ -1998,7 +2073,8 @@ run_extraction_if_needed() {
     log "Memory extraction failed (exit code $code). Check $EXTRACT_LOG_FILE for details"
   fi
 
-  cleanup_forked_sessions "$fork_started_at_ms" "$parent_session_title"
+  cleanup_forked_sessions "$fork_before_ids" "$parent_session_title"
+  rm -f "$fork_before_ids"
   release_simple_lock "$MEMORY_LOCK_FILE"
 }
 
@@ -2068,8 +2144,9 @@ run_autodream_if_needed() {
   fi
   cmd+=("$AUTODREAM_PROMPT")
 
-  local fork_started_at_ms
-  fork_started_at_ms=$(( $(date +%s) * 1000 ))
+  local fork_before_ids
+  fork_before_ids=$(mktemp)
+  snapshot_session_ids "$fork_before_ids"
 
   if "${cmd[@]}" >> "$AUTODREAM_LOG_FILE" 2>&1; then
     log "Auto-dream consolidation completed successfully"
@@ -2082,7 +2159,8 @@ run_autodream_if_needed() {
     append_dream_journal "auto-dream" "fail" "$session_id"
   fi
 
-  cleanup_forked_sessions "$fork_started_at_ms" "$parent_session_title"
+  cleanup_forked_sessions "$fork_before_ids" "$parent_session_title"
+  rm -f "$fork_before_ids"
   release_simple_lock "$MEMORY_LOCK_FILE"
 }
 
@@ -2233,8 +2311,9 @@ run_dream_forced() {
   [ -n "$dream_model" ] && cmd+=(-m "$dream_model")
   [ -n "$AUTODREAM_AGENT" ] && cmd+=(--agent "$AUTODREAM_AGENT")
   cmd+=("$AUTODREAM_PROMPT")
-  local fork_started_at_ms
-  fork_started_at_ms=$(( $(date +%s) * 1000 ))
+  local fork_before_ids
+  fork_before_ids=$(mktemp)
+  snapshot_session_ids "$fork_before_ids"
   if "${cmd[@]}" >> "$AUTODREAM_LOG_FILE" 2>&1; then
     log "dream: consolidation completed"
     append_dream_journal "dream" "ok" "$session_id"
@@ -2243,13 +2322,151 @@ run_dream_forced() {
     log "dream: consolidation failed (exit code $code). Check $AUTODREAM_LOG_FILE"
     append_dream_journal "dream" "fail" "$session_id"
   fi
-  cleanup_forked_sessions "$fork_started_at_ms" "$parent_session_title"
+  cleanup_forked_sessions "$fork_before_ids" "$parent_session_title"
+  rm -f "$fork_before_ids"
   release_simple_lock "$MEMORY_LOCK_FILE"
+}
+
+# List leaked extraction/dream fork sessions (id<TAB>title), newest first. A
+# candidate is an un-archived "<parent> (fork #N)" session whose transcript shows
+# this tool's fingerprint: the extraction/dream prompt text, or a memory_* /
+# harness_feedback tool call. Hand-made user forks (normal edit/write/bash work,
+# no memory tools) never match. Honours --all vs the working-dir repo scope.
+list_purgeable_fork_sessions() {
+  local db_path
+  db_path=$(get_opencode_db_path)
+  [ -f "$db_path" ] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+
+  python3 - "$db_path" "$WORKING_DIR" "$PROJECT_SCOPE_DIR" "${PURGE_FORKS_ALL:-0}" <<'PY'
+import os, re, sqlite3, sys
+
+db_path, workdir, project_dir, all_dirs_raw = sys.argv[1:5]
+ALL = all_dirs_raw == "1"
+SCOPE_ROOT = os.path.realpath(project_dir) if project_dir else ""
+WORKDIR = os.path.realpath(workdir) if workdir else ""
+
+FORK_TITLE = re.compile(r" \(fork #\d+\)$")
+# Prompt-text fingerprints of our extraction/dream forks (current + older wording).
+SIGS = (
+    "post-session extraction subagent",
+    "post-session memory extraction subagent",
+    "TWO ORDERED PHASES",
+    "Phase 1 — Harness feedback",
+    "You are performing a dream",
+    "pruning pass over this project's memory",
+)
+# Tools only our extraction/dream agent calls — a strong fingerprint on its own.
+MEM_TOOLS = {"memory_save", "memory_list", "memory_read", "memory_delete", "memory_search", "harness_feedback"}
+
+def _git_root(d):
+    cur = os.path.realpath(d)
+    while True:
+        if os.path.exists(os.path.join(cur, ".git")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+
+def in_scope(d):
+    if ALL:
+        return True
+    if not d:
+        return False
+    rd = os.path.realpath(d)
+    if rd == WORKDIR or rd == SCOPE_ROOT:
+        return True
+    if SCOPE_ROOT and rd.startswith(SCOPE_ROOT + os.sep):
+        gr = _git_root(rd)
+        return gr is None or gr == SCOPE_ROOT
+    return False
+
+try:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    forks = conn.execute(
+        "SELECT id, title, directory, time_created FROM session "
+        "WHERE time_archived IS NULL ORDER BY time_created DESC"
+    ).fetchall()
+except Exception:
+    raise SystemExit(1)
+
+def has_signature(sid):
+    # tool fingerprint first (cheap, decisive)
+    for (tool,) in conn.execute(
+        "SELECT json_extract(data,'$.tool') FROM part "
+        "WHERE session_id=? AND json_extract(data,'$.type')='tool'", (sid,)):
+        if tool in MEM_TOOLS:
+            return True
+    # else scan text parts for a prompt fingerprint
+    for (data,) in conn.execute(
+        "SELECT data FROM part WHERE session_id=? AND json_extract(data,'$.type')='text'", (sid,)):
+        if data and any(s in data for s in SIGS):
+            return True
+    return False
+
+for r in forks:
+    sid, title, directory = r["id"], r["title"], r["directory"]
+    if not sid or not title or not directory:
+        continue
+    if not FORK_TITLE.search(title):
+        continue
+    if not in_scope(directory):
+        continue
+    if not has_signature(sid):
+        continue
+    print(f"{sid}\t{title}")
+
+conn.close()
+PY
+}
+
+run_purge_forks() {
+  local rows
+  rows=$(list_purgeable_fork_sessions || true)
+
+  if [ -z "$rows" ]; then
+    echo "[opencode-memory] purge-forks: no leaked extraction/dream fork sessions found${PURGE_FORKS_ALL:+ (--all)}."
+    return 0
+  fi
+
+  local count
+  count=$(printf '%s\n' "$rows" | grep -c .)
+  local scope_desc="repo scope ($PROJECT_SCOPE_DIR)"
+  [ "${PURGE_FORKS_ALL:-0}" = "1" ] && scope_desc="all directories"
+
+  if [ "${PURGE_FORKS_CONFIRM:-0}" != "1" ]; then
+    echo "[opencode-memory] purge-forks (dry run): $count leaked fork session(s) in $scope_desc:"
+    printf '%s\n' "$rows" | sed 's/\t/  /' | sed 's/^/  - /'
+    echo "[opencode-memory] Re-run with --yes to delete them."
+    return 0
+  fi
+
+  echo "[opencode-memory] purge-forks: deleting $count leaked fork session(s) in $scope_desc..."
+  local deleted=0 fork_id title
+  while IFS=$'\t' read -r fork_id title; do
+    [ -n "$fork_id" ] || continue
+    if "$REAL_OPENCODE" session delete "$fork_id" >/dev/null 2>&1; then
+      deleted=$((deleted + 1))
+      echo "  deleted $fork_id  ($title)"
+    else
+      echo "  FAILED  $fork_id  ($title)" >&2
+    fi
+  done <<< "$rows"
+  echo "[opencode-memory] purge-forks: deleted $deleted/$count."
 }
 
 # ============================================================================
 # Main
 # ============================================================================
+
+# Purge-forks mode (`opencode-memory purge-forks`): one-shot cleanup of leaked
+# extraction/dream fork sessions. Dry-run unless --yes was passed.
+if [ "${PURGE_FORKS_MODE:-0}" = "1" ]; then
+  run_purge_forks
+  exit 0
+fi
 
 # Maintenance-only mode (`opencode-memory maintain`): skip the interactive run
 # and process the latest session directly. Runs in the foreground so a caller
