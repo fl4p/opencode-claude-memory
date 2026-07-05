@@ -34,12 +34,13 @@
 #   dream [--dir DIR]              — one consolidation pass over DIR's live memory
 #                                    store (collapse duplicates, prune stale),
 #                                    bypassing the auto-dream gate. No extraction.
-#   purge-forks [--dir DIR]        — delete leaked post-session extraction/dream
-#     [--all] [--yes]                fork sessions that clutter `opencode session
-#                                    list`. Only forks bearing this tool's
-#                                    signature (its prompt / a memory_* tool call)
-#                                    are removed; hand-made forks are kept. Dry-run
-#                                    unless --yes. --all ignores the repo scope.
+#   purge-forks [--dir DIR]        — delete turn-less "(fork #N)" sessions that
+#     [--all] [--yes]                clutter `opencode session list`: forks with no
+#                                    message of their own after the fork point
+#                                    (abandoned copies + leaked post-session
+#                                    extraction/dream forks). A fork you actually
+#                                    continued is kept. Dry-run unless --yes. --all
+#                                    ignores the repo scope.
 #
 # Environment variables:
 #   OPENCODE_MEMORY_EXTRACT=0                 — Disable post-session extraction
@@ -2327,37 +2328,32 @@ run_dream_forced() {
   release_simple_lock "$MEMORY_LOCK_FILE"
 }
 
-# List leaked extraction/dream fork sessions (id<TAB>title), newest first. A
-# candidate is an un-archived "<parent> (fork #N)" session whose transcript shows
-# this tool's fingerprint: the extraction/dream prompt text, or a memory_* /
-# harness_feedback tool call. Hand-made user forks (normal edit/write/bash work,
-# no memory tools) never match. Honours --all vs the working-dir repo scope.
+# List purgeable fork sessions (id<TAB>title), newest first: un-archived
+# "<parent> (fork #N)" sessions with NO turn of their own — nothing was added
+# after the fork point, so they are dangling copies cluttering the session picker
+# (abandoned forks, and headless forks that never took). A fork is "turn-less"
+# when no message was created more than TURN_GRACE_MS after the session itself.
+# This is the safe discriminator: a fork you actually continued always has later
+# messages, so real work is never selected; content signatures are not needed and
+# would false-positive on real sessions that happen to call memory_* tools.
+# Honours --all vs the working-dir repo scope.
+TURN_GRACE_MS=2000
 list_purgeable_fork_sessions() {
   local db_path
   db_path=$(get_opencode_db_path)
   [ -f "$db_path" ] || return 1
   command -v python3 >/dev/null 2>&1 || return 1
 
-  python3 - "$db_path" "$WORKING_DIR" "$PROJECT_SCOPE_DIR" "${PURGE_FORKS_ALL:-0}" <<'PY'
+  python3 - "$db_path" "$WORKING_DIR" "$PROJECT_SCOPE_DIR" "${PURGE_FORKS_ALL:-0}" "${TURN_GRACE_MS:-2000}" <<'PY'
 import os, re, sqlite3, sys
 
-db_path, workdir, project_dir, all_dirs_raw = sys.argv[1:5]
+db_path, workdir, project_dir, all_dirs_raw, grace_raw = sys.argv[1:6]
 ALL = all_dirs_raw == "1"
+GRACE = int(grace_raw or "2000")
 SCOPE_ROOT = os.path.realpath(project_dir) if project_dir else ""
 WORKDIR = os.path.realpath(workdir) if workdir else ""
 
 FORK_TITLE = re.compile(r" \(fork #\d+\)$")
-# Prompt-text fingerprints of our extraction/dream forks (current + older wording).
-SIGS = (
-    "post-session extraction subagent",
-    "post-session memory extraction subagent",
-    "TWO ORDERED PHASES",
-    "Phase 1 — Harness feedback",
-    "You are performing a dream",
-    "pruning pass over this project's memory",
-)
-# Tools only our extraction/dream agent calls — a strong fingerprint on its own.
-MEM_TOOLS = {"memory_save", "memory_list", "memory_read", "memory_delete", "memory_search", "harness_feedback"}
 
 def _git_root(d):
     cur = os.path.realpath(d)
@@ -2392,29 +2388,27 @@ try:
 except Exception:
     raise SystemExit(1)
 
-def has_signature(sid):
-    # tool fingerprint first (cheap, decisive)
-    for (tool,) in conn.execute(
-        "SELECT json_extract(data,'$.tool') FROM part "
-        "WHERE session_id=? AND json_extract(data,'$.type')='tool'", (sid,)):
-        if tool in MEM_TOOLS:
-            return True
-    # else scan text parts for a prompt fingerprint
-    for (data,) in conn.execute(
-        "SELECT data FROM part WHERE session_id=? AND json_extract(data,'$.type')='text'", (sid,)):
-        if data and any(s in data for s in SIGS):
-            return True
-    return False
+def has_own_turn(sid, created):
+    # A message created past the fork's own creation (+grace) is a genuine new
+    # turn. Forked-in copies of the parent share the parent's earlier timestamps,
+    # so they do not count. Guard created being NULL/0 (then keep, never purge).
+    if not created:
+        return True
+    row = conn.execute(
+        "SELECT 1 FROM message WHERE session_id=? AND time_created > ? LIMIT 1",
+        (sid, created + GRACE),
+    ).fetchone()
+    return row is not None
 
 for r in forks:
-    sid, title, directory = r["id"], r["title"], r["directory"]
+    sid, title, directory, created = r["id"], r["title"], r["directory"], r["time_created"]
     if not sid or not title or not directory:
         continue
     if not FORK_TITLE.search(title):
         continue
     if not in_scope(directory):
         continue
-    if not has_signature(sid):
+    if has_own_turn(sid, created):
         continue
     print(f"{sid}\t{title}")
 
