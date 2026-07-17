@@ -4,10 +4,10 @@ import { parse, resolve } from "path"
 import { spawn } from "node:child_process"
 import { existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
-import { buildMemorySystemPrompt, buildIndexLimitWarning } from "./prompt.js"
-import { formatRecalledMemories, recallSelectedMemories, type RecalledMemory } from "./recall.js"
-import { isSupportedRecallSelectorClient, selectRelevantMemoryFilenames, type SessionClient } from "./recallSelector.js"
-import { scanMemoryFiles, getMemoryManifest, type MemoryHeader } from "./memoryScan.js"
+import { buildMemorySystemPrompt, buildIndexLimitWarning } from "./core/prompt.js"
+import { formatRecalledMemories, recallSelectedMemories, type RecalledMemory } from "./core/recall.js"
+import { isSupportedRecallSelectorClient, selectRelevantMemoryFilenames, type SessionClient } from "./core/recallSelector.js"
+import { scanMemoryFiles, getMemoryManifest, type MemoryHeader } from "./core/memoryScan.js"
 import {
   saveMemory,
   deleteMemory,
@@ -16,7 +16,7 @@ import {
   readMemory,
   readIndex,
   MEMORY_TYPES,
-} from "./memory.js"
+} from "./core/memory.js"
 import {
   getMemoryDir,
   findCanonicalGitRoot,
@@ -27,9 +27,9 @@ import {
   setRedactGlobalSecrets,
   shouldRedactMemory,
   isInRepoMemory,
-} from "./paths.js"
-import { scrubMemoryFields } from "./redact.js"
-import { saveHarnessFeedback, HARNESS_FEEDBACK_CATEGORIES } from "./harness.js"
+} from "./core/paths.js"
+import { scrubMemoryFields } from "./core/redact.js"
+import { saveHarnessFeedback, HARNESS_FEEDBACK_CATEGORIES } from "./core/harness.js"
 
 // Per-turn derived state — overwritten each time messages.transform fires.
 // This replaces the old process-global session Maps so that compact naturally
